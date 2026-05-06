@@ -5,3 +5,15 @@ backend/db/
 *.gguf
 venv/
 .venv/
+
+
+Library/
+Temp/
+Obj/
+Build/
+Logs/
+UserSettings/
+*.csproj
+*.unityproj
+*.sln
+*.user
