@@ -6,7 +6,10 @@ from config import LM_STUDIO_BASE_URL, LM_STUDIO_MODEL
 from models.schemas import ChatRequest, ChatResponse
 from npc.prompts import NPC_SYSTEMS
 from npc.npc_list import VALID_NPCS
-from rag.retriever import retrieve_context
+from rag.retriever import retrieve_context 
+
+import os
+MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
 app = FastAPI()
 
@@ -50,14 +53,16 @@ def chat(req: ChatRequest):
 """
 
     # 5. Call LM Studio
-    response = client.chat.completions.create(
-        model=LM_STUDIO_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            *[{"role": m.role, "content": m.content} for m in req.messages]
-        ]
-    )
-
-    reply = response.choices[0].message.content
+    if MOCK_MODE:
+        reply = f"[MOCK] {req.npc} 응답 테스트 | RAG context: {context[:100] if context else '없음'}"
+    else:
+        response = client.chat.completions.create(
+            model=LM_STUDIO_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                *[{"role": m.role, "content": m.content} for m in req.messages]
+            ]
+        )
+        reply = response.choices[0].message.content
 
     return ChatResponse(reply=reply, npc=req.npc)
