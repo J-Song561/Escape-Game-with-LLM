@@ -1,0 +1,20 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e4ce4f6d3790f8545a342b1bf357a743, type: 3}
+  m_Name: OrphanageRecord
+  m_EditorClassIdentifier: Assembly-CSharp::ClueData
+  clueName: "\uBCF4\uC721\uC6D0 \uAE30\uB85D"
+  icon: {fileID: 1484711702, guid: c924bf1f34895d94fb8fcd03f6055839, type: 3}
+  description: "\uB0B4\uAC00 \uBCF4\uC721\uC6D0\uC5D0 \uC788\uB358 \uC2DC\uC808 \uB0B4
+    \uC815\uBCF4\uAC00 \uB2F4\uACA8\uC788\uB2E4. \uB098\uC774 : 8\uC138, \uC628\uBAB8\uC774
+    \uAE4C\uB9E3\uAC8C \uD0C4 \uCC44 \uB5A0\uB3CC\uB2E4 \uB3CC\uC544\uC634. \uC544\uBC84\uC9C0\uB97C
+    \uD654\uC7AC\uB85C \uC783\uC74C."

@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: beb87db6153f69442821a348e08035ab
+timeCreated: 1475703302
+licenseType: Store
+NativeFormatImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 73088
+  packageName: Rusty Black Shovel
+  packageVersion: 1.0
+  assetPath: Assets/RustyBlackShovel/Prefabs/RustyShovel.prefab
+  uploadId: 140429

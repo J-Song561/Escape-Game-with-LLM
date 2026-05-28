@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: aed041cec79f65a4eb9c85a9cf6c2c2f
+timeCreated: 1475625229
+licenseType: Store
+NativeFormatImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 73088
+  packageName: Rusty Black Shovel
+  packageVersion: 1.0
+  assetPath: Assets/RustyBlackShovel/Materials/PBS_RustyShovel.mat
+  uploadId: 140429

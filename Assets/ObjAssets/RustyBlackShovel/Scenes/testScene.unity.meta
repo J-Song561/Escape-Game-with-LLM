@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: f959d648a3baad747922cb5b10338685
+timeCreated: 1475627304
+licenseType: Store
+DefaultImporter:
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 73088
+  packageName: Rusty Black Shovel
+  packageVersion: 1.0
+  assetPath: Assets/RustyBlackShovel/Scenes/testScene.unity
+  uploadId: 140429
