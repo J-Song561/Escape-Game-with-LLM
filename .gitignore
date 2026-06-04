@@ -5,7 +5,7 @@ backend/db/
 *.gguf
 venv/
 .venv/
-
+mlruns/
 
 Library/
 Temp/
