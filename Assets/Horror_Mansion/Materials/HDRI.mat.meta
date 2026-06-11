@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: d029d5481e00d1449b42e55b6635b053
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 254104
+  packageName: Horror Mansion
+  packageVersion: 1.3
+  assetPath: Assets/Horror_Mansion/Materials/HDRI.mat
+  uploadId: 650397

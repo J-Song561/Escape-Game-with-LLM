@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 3ce77bcf86ccb9d45a08aa10a5e0cdff
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 2100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 254104
+  packageName: Horror Mansion
+  packageVersion: 1.3
+  assetPath: Assets/Horror_Mansion/Materials/Environment/Fireplace_no_Emissive.mat
+  uploadId: 650397

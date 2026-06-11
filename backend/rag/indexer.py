@@ -1,33 +1,37 @@
 import os
+import re
 import chromadb
 from rag.embedder import get_embedding
 
-# Point to your story folder and ChromaDB storage
 STORY_DIR = os.path.join(os.path.dirname(__file__), "../story")
 DB_DIR = os.path.join(os.path.dirname(__file__), "../db/story_db")
 
-# Initialize ChromaDB
 client = chromadb.PersistentClient(path=DB_DIR)
 collection = client.get_or_create_collection("story")
 
-def chunk_text(text: str, chunk_size: int = 300, overlap: int = 50) -> list:
-    """Split text into overlapping chunks."""
-    words = text.split()
+def chunk_text(text: str, chunk_size: int = 150, overlap: int = 30) -> list:
+    """Split by ## headers first, then by word count if section is too long."""
+    sections = re.split(r'\n(?=## )', text)
     chunks = []
-    start = 0
 
-    while start < len(words):
-        end = start + chunk_size
-        chunk = " ".join(words[start:end])
-        chunks.append(chunk)
-        start += chunk_size - overlap  # overlap so context isn't lost at boundaries
+    for section in sections:
+        if not section.strip():
+            continue
+        words = section.split()
+        if len(words) <= chunk_size:
+            # 섹션이 짧으면 그대로 하나의 청크
+            chunks.append(section.strip())
+        else:
+            # 섹션이 너무 길면 추가 분할
+            start = 0
+            while start < len(words):
+                end = start + chunk_size
+                chunks.append(" ".join(words[start:end]))
+                start += chunk_size - overlap
 
     return chunks
 
 def index_story_files():
-    """Read all .md files in story/ and index them into ChromaDB."""
-    
-    # Clear existing data so re-running doesn't duplicate
     existing = collection.get()
     if existing["ids"]:
         collection.delete(ids=existing["ids"])
@@ -39,7 +43,7 @@ def index_story_files():
         if not filename.endswith(".md"):
             continue
 
-        npc_id = filename.replace(".md", "")  # e.g. "ella.md" → "ella"
+        npc_id = filename.replace(".md", "")
         filepath = os.path.join(STORY_DIR, filename)
 
         with open(filepath, "r", encoding="utf-8") as f:
@@ -50,12 +54,11 @@ def index_story_files():
         for i, chunk in enumerate(chunks):
             chunk_id = f"{npc_id}_{i}"
             embedding = get_embedding(chunk)
-
             collection.add(
                 ids=[chunk_id],
                 embeddings=[embedding],
                 documents=[chunk],
-                metadatas=[{"npc": npc_id}]  # tag each chunk with its NPC
+                metadatas=[{"npc": npc_id}]
             )
 
         print(f"Indexed {len(chunks)} chunks from {filename}")
