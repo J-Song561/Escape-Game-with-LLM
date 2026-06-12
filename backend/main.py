@@ -51,7 +51,8 @@ def chat(req: ChatRequest):
 [관련 배경 정보 — 절대 직접 언급하지 말 것. 행동 지침에만 활용할 것]
 {context}
 """
-
+    system_prompt += "\n/no_think"
+    
     # 5. Call LM Studio
     if MOCK_MODE:
         reply = f"[MOCK] {req.npc} 응답 테스트 | RAG context: {context[:100] if context else '없음'}"
@@ -64,5 +65,7 @@ def chat(req: ChatRequest):
             ]
         )
         reply = response.choices[0].message.content
-
+        if not reply:  # ← 추가 (None 방어)
+            reply = "..."
+            
     return ChatResponse(reply=reply, npc=req.npc)
