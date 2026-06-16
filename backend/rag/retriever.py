@@ -23,6 +23,17 @@ def retrieve_context(user_message: str, npc_id: str) -> str:
 
     # results["documents"] returns a list of lists, grab the inner list
     chunks = results["documents"][0]
+    
+    print("\n=== RAG 검색 결과 ===")
+    print(f"질문: {user_message}")
+    for i, chunk in enumerate(chunks):
+        print(f"\n[청크 {i+1}]\n{chunk[:100]}...")  # 앞 100자만
+    print("====================\n")
+
+    if not chunks:
+        return ""
+
+    return "\n\n---\n\n".join(chunks)
 
     if not chunks:
         return ""
