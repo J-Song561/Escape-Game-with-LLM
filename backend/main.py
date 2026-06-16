@@ -67,5 +67,5 @@ def chat(req: ChatRequest):
         reply = response.choices[0].message.content
         if not reply:  # ← 추가 (None 방어)
             reply = "..."
-            
+        reply = reply.strip()    
     return ChatResponse(reply=reply, npc=req.npc)
