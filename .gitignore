@@ -6,7 +6,7 @@ backend/db/
 venv/
 .venv/
 mlruns/
-
+memory/sessions.db 
 Library/
 Temp/
 Obj/
