@@ -45,19 +45,22 @@ def init_db():
     # 세션 메타 (요약 저장)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
-            session_id      TEXT PRIMARY KEY,
-            summary         TEXT DEFAULT '',
-            last_summary_at INTEGER DEFAULT 0,
-            created_at      TEXT,
-            updated_at      TEXT
+            session_id        TEXT PRIMARY KEY,
+            summary           TEXT DEFAULT '',
+            last_summary_at   INTEGER DEFAULT 0,
+            summary_fail_count INTEGER DEFAULT 0,
+            created_at        TEXT,
+            updated_at        TEXT
         )
     """)
 
-    # 기존 DB에 last_summary_at 컬럼이 없으면 추가 (마이그레이션)
+    # 기존 DB에 컬럼이 없으면 추가 (마이그레이션)
     cur.execute("PRAGMA table_info(sessions)")
     columns = [row["name"] for row in cur.fetchall()]
     if "last_summary_at" not in columns:
         cur.execute("ALTER TABLE sessions ADD COLUMN last_summary_at INTEGER DEFAULT 0")
+    if "summary_fail_count" not in columns:
+        cur.execute("ALTER TABLE sessions ADD COLUMN summary_fail_count INTEGER DEFAULT 0")
 
     # 대화 기록
     cur.execute("""
@@ -183,14 +186,22 @@ def add_fact(session_id: str, fact: str):
     conn.close()
 
 
-def get_facts(session_id: str) -> List[str]:
-    """유저가 지금까지 알아낸 단서 목록."""
+def get_facts(session_id: str, limit: int = 20) -> List[str]:
+    """
+    유저가 알아낸 단서 목록.
+    limit개까지만 반환하되, 최근에 추가된 것 우선 (프롬프트 폭발 방지).
+    반환은 오래된 → 최신 순으로 정렬해 자연스럽게 읽히도록 함.
+    """
     conn = _connect()
     cur = conn.cursor()
-    cur.execute("SELECT fact FROM facts WHERE session_id = ? ORDER BY id", (session_id,))
+    # 최근 것 우선으로 limit개 가져온 뒤, 다시 시간순으로 뒤집음
+    cur.execute(
+        "SELECT fact FROM facts WHERE session_id = ? ORDER BY id DESC LIMIT ?",
+        (session_id, limit),
+    )
     rows = cur.fetchall()
     conn.close()
-    return [r["fact"] for r in rows]
+    return [r["fact"] for r in reversed(rows)]
 
 
 def count_messages(session_id: str) -> int:
@@ -221,6 +232,42 @@ def set_last_summary_at(session_id: str, count: int):
     cur.execute(
         "UPDATE sessions SET last_summary_at = ? WHERE session_id = ?",
         (count, session_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_fail_count(session_id: str) -> int:
+    """요약 연속 실패 횟수."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT summary_fail_count FROM sessions WHERE session_id = ?", (session_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row["summary_fail_count"] if row and row["summary_fail_count"] is not None else 0
+
+
+def increment_fail_count(session_id: str):
+    """요약 실패 시 카운터 +1."""
+    _ensure_session(session_id)
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE sessions SET summary_fail_count = summary_fail_count + 1 WHERE session_id = ?",
+        (session_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def reset_fail_count(session_id: str):
+    """요약 성공 시 카운터 0으로."""
+    _ensure_session(session_id)
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE sessions SET summary_fail_count = 0 WHERE session_id = ?",
+        (session_id,),
     )
     conn.commit()
     conn.close()

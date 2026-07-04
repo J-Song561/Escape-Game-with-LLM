@@ -30,8 +30,11 @@ client = OpenAI(
 
 store.init_db()
 
-# 몇 개의 메시지마다 요약/facts를 갱신할지 (테스트 중엔 2, 실사용 6 권장)
+# 몇 개의 메시지마다 요약/facts를 갱신할지 (테스트 2, 실사용 6)
 SUMMARY_EVERY = 6
+
+# 요약이 연속 이만큼 실패하면 그 구간은 포기하고 넘어감 (무한 재시도 방지)
+MAX_SUMMARY_FAILS = 3
 
 
 @app.get("/health")
@@ -114,14 +117,29 @@ def _maybe_update_memory(session_id: str):
                         saved += 1
                 print(f">>> [MEMORY] facts {saved}개 저장 완료", flush=True)
 
-            # 요약이 성공했을 때만 카운터 갱신 (실패 시 다음 턴 재시도)
+            # 성공: 카운터 갱신 + 실패 횟수 리셋
             store.set_last_summary_at(session_id, total)
+            store.reset_fail_count(session_id)
             print(f">>> [MEMORY] last_summary_at = {total} 갱신", flush=True)
         else:
-            print(">>> [MEMORY] JSON 파싱 실패 — 저장 안 됨, 다음 턴 재시도", flush=True)
+            # 파싱 실패 → 실패 카운트 증가, 한계 넘으면 포기하고 넘어감
+            store.increment_fail_count(session_id)
+            fails = store.get_fail_count(session_id)
+            print(f">>> [MEMORY] JSON 파싱 실패 ({fails}/{MAX_SUMMARY_FAILS})", flush=True)
+            if fails >= MAX_SUMMARY_FAILS:
+                store.set_last_summary_at(session_id, total)
+                store.reset_fail_count(session_id)
+                print(">>> [MEMORY] 연속 실패 한계 도달 — 이번 구간 포기하고 다음으로 넘어감", flush=True)
 
     except Exception as e:
-        print(f">>> [MEMORY ERROR] {type(e).__name__}: {e}", flush=True)
+        # LLM 호출 자체 실패도 동일하게 카운트 (무한 재시도 방지)
+        store.increment_fail_count(session_id)
+        fails = store.get_fail_count(session_id)
+        print(f">>> [MEMORY ERROR] {type(e).__name__}: {e} ({fails}/{MAX_SUMMARY_FAILS})", flush=True)
+        if fails >= MAX_SUMMARY_FAILS:
+            store.set_last_summary_at(session_id, total)
+            store.reset_fail_count(session_id)
+            print(">>> [MEMORY] 연속 실패 한계 도달 — 이번 구간 포기하고 다음으로 넘어감", flush=True)
 
 
 @app.post("/chat", response_model=ChatResponse)
