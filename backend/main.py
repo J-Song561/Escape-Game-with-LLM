@@ -10,6 +10,8 @@ from rag.retriever import retrieve_context
 from memory import store  # ← 추가: 메모리 모듈
 
 import os
+import json
+import re
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
 app = FastAPI()
@@ -40,10 +42,29 @@ def health():
     return {"status": "ok"}
 
 
-def _maybe_update_summary(session_id: str):
+def _extract_json(text: str):
     """
-    대화가 SUMMARY_EVERY 개수마다 한 번씩만 요약을 갱신한다.
-    매턴 요약하면 느려지므로 주기적으로만 수행.
+    작은 모델의 지저분한 출력에서 JSON을 안전하게 추출.
+    코드펜스(```), <think> 태그, 앞뒤 설명 텍스트를 제거하고
+    첫 '{' ~ 마지막 '}' 구간을 파싱한다. 실패하면 None.
+    """
+    text = re.sub(r"```(json)?", "", text)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1:
+        return None
+    try:
+        return json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+
+
+def _maybe_update_memory(session_id: str):
+    """
+    대화가 SUMMARY_EVERY 개수마다 한 번씩만 실행.
+    한 번의 LLM 호출로 '요약'과 '유저가 알아낸 것들(facts)'을 동시에 추출한다.
+    매턴 하면 느려지므로 주기적으로만 수행.
     """
     total = store.count_messages(session_id)
     if total == 0 or total % SUMMARY_EVERY != 0:
@@ -51,26 +72,49 @@ def _maybe_update_summary(session_id: str):
     if MOCK_MODE:
         return
 
-    # 세션 전체 대화를 가져와 요약
+    # 세션 전체(최근) 대화를 가져옴 — 특정 NPC가 아니라 유저의 전반적 흐름
     history = store.get_recent_messages(session_id, limit=SUMMARY_EVERY * 2)
     convo_text = "\n".join(f"[{m['role']}] {m['content']}" for m in history)
+
+    system_prompt = (
+        "너는 추리 게임의 대화 분석기다. 아래 유저와 NPC의 대화를 분석해서 "
+        "반드시 아래 JSON 형식으로만 답하라. 다른 말은 절대 붙이지 마라.\n\n"
+        "{\n"
+        '  "summary": "유저가 무엇을 원하고 어떤 행동 패턴을 보이는지 3문장 이내 요약",\n'
+        '  "facts": ["유저가 이 대화를 통해 알게 되었거나 드러난 정보들. 게임 단서뿐 아니라 유저의 의도·관심사·상황도 포함. 각 항목은 짧은 한 문장."]\n'
+        "}\n\n"
+        "facts 예시: [\"유저는 이스터 경이라는 인물의 존재를 알게 됨\", "
+        "\"유저는 저택에서 나가는 방법을 계속 찾고 있음\", "
+        "\"유저는 엘라를 의심하기 시작함\"]\n"
+        "/no_think"
+    )
 
     try:
         resp = client.chat.completions.create(
             model=LM_STUDIO_MODEL,
             messages=[
-                {"role": "system", "content":
-                    "다음 대화를 3문장 이내로 요약해. "
-                    "유저가 무엇을 알아냈는지, 무엇을 원하는지, 어떤 행동 패턴을 보이는지 위주로. "
-                    "/no_think"},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": convo_text},
             ],
         )
-        summary = (resp.choices[0].message.content or "").strip()
-        if summary:
-            store.set_summary(session_id, summary)
+        raw = (resp.choices[0].message.content or "").strip()
+        data = _extract_json(raw)
+
+        if data:
+            # 요약 저장
+            summary = str(data.get("summary", "")).strip()
+            if summary:
+                store.set_summary(session_id, summary)
+
+            # facts 저장 (중복은 store.add_fact가 알아서 걸러줌)
+            facts = data.get("facts", [])
+            if isinstance(facts, list):
+                for f in facts:
+                    f = str(f).strip()
+                    if f:
+                        store.add_fact(session_id, f)
     except Exception:
-        # 요약 실패해도 대화는 계속 진행 (치명적이지 않음)
+        # 실패해도 대화는 계속 진행 (치명적이지 않음)
         pass
 
 
@@ -142,10 +186,10 @@ def chat(req: ChatRequest):
             reply = "..."
         reply = reply.strip()
 
-    # NPC 응답도 메모리에 저장
+    # 5-1. ← 추가: NPC 응답도 메모리에 저장
     store.add_message(req.session_id, req.npc, "assistant", reply)
 
-    # 주기적으로 요약 갱신
-    _maybe_update_summary(req.session_id)
+    # 5-2. ← 추가: 주기적으로 요약 + facts 갱신
+    _maybe_update_memory(req.session_id)
 
     return ChatResponse(reply=reply, npc=req.npc)
