@@ -7,7 +7,7 @@ from models.schemas import ChatRequest, ChatResponse
 from npc.prompts import NPC_SYSTEMS
 from npc.npc_list import VALID_NPCS
 from rag.retriever import retrieve_context
-from memory import store  # ← 추가: 메모리 모듈
+from memory import store
 
 import os
 import json
@@ -16,7 +16,6 @@ MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
 app = FastAPI()
 
-# CORS — allows Unity and frontend to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,16 +23,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# LM Studio client
 client = OpenAI(
     base_url=LM_STUDIO_BASE_URL,
-    api_key="lm-studio"  # required by library but ignored by LM Studio
+    api_key="lm-studio"
 )
 
-# ← 추가: 서버 시작 시 메모리 DB 초기화 (테이블 없으면 생성)
 store.init_db()
 
-# 대화가 이만큼 쌓이면 요약을 갱신 (LLM 호출 최소화를 위해 매턴 X)
+# 몇 개의 메시지마다 요약/facts를 갱신할지 (테스트 중엔 2, 실사용 6 권장)
 SUMMARY_EVERY = 6
 
 
@@ -43,11 +40,7 @@ def health():
 
 
 def _extract_json(text: str):
-    """
-    작은 모델의 지저분한 출력에서 JSON을 안전하게 추출.
-    코드펜스(```), <think> 태그, 앞뒤 설명 텍스트를 제거하고
-    첫 '{' ~ 마지막 '}' 구간을 파싱한다. 실패하면 None.
-    """
+    """지저분한 LLM 출력에서 JSON만 안전하게 추출. 실패 시 None."""
     text = re.sub(r"```(json)?", "", text)
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     start = text.find("{")
@@ -61,18 +54,21 @@ def _extract_json(text: str):
 
 
 def _maybe_update_memory(session_id: str):
-    """
-    대화가 SUMMARY_EVERY 개수마다 한 번씩만 실행.
-    한 번의 LLM 호출로 '요약'과 '유저가 알아낸 것들(facts)'을 동시에 추출한다.
-    매턴 하면 느려지므로 주기적으로만 수행.
-    """
+    """마지막 요약 이후 SUMMARY_EVERY개 이상 쌓이면 요약 + facts 추출/저장."""
     total = store.count_messages(session_id)
-    if total == 0 or total % SUMMARY_EVERY != 0:
+    last = store.get_last_summary_at(session_id)
+    new_messages = total - last
+    print(f">>> [MEMORY] 함수 진입 | session={session_id} | total={total} | 마지막 요약 이후 {new_messages}개", flush=True)
+
+    if new_messages < SUMMARY_EVERY:
+        print(f">>> [MEMORY] 아직 {new_messages}개 (기준 {SUMMARY_EVERY}개) — 대기", flush=True)
         return
     if MOCK_MODE:
+        print(">>> [MEMORY] MOCK_MODE라 스킵", flush=True)
         return
 
-    # 세션 전체(최근) 대화를 가져옴 — 특정 NPC가 아니라 유저의 전반적 흐름
+    print(">>> [MEMORY] 트리거됨! LLM에게 요약 요청 중...", flush=True)
+
     history = store.get_recent_messages(session_id, limit=SUMMARY_EVERY * 2)
     convo_text = "\n".join(f"[{m['role']}] {m['content']}" for m in history)
 
@@ -99,23 +95,33 @@ def _maybe_update_memory(session_id: str):
         )
         raw = (resp.choices[0].message.content or "").strip()
         data = _extract_json(raw)
+        print(f">>> [MEMORY] raw 응답: {raw[:200]}", flush=True)
+        print(f">>> [MEMORY] 파싱 결과: {data}", flush=True)
 
         if data:
-            # 요약 저장
             summary = str(data.get("summary", "")).strip()
             if summary:
                 store.set_summary(session_id, summary)
+                print(">>> [MEMORY] 요약 저장 완료", flush=True)
 
-            # facts 저장 (중복은 store.add_fact가 알아서 걸러줌)
             facts = data.get("facts", [])
             if isinstance(facts, list):
+                saved = 0
                 for f in facts:
                     f = str(f).strip()
                     if f:
                         store.add_fact(session_id, f)
-    except Exception:
-        # 실패해도 대화는 계속 진행 (치명적이지 않음)
-        pass
+                        saved += 1
+                print(f">>> [MEMORY] facts {saved}개 저장 완료", flush=True)
+
+            # 요약이 성공했을 때만 카운터 갱신 (실패 시 다음 턴 재시도)
+            store.set_last_summary_at(session_id, total)
+            print(f">>> [MEMORY] last_summary_at = {total} 갱신", flush=True)
+        else:
+            print(">>> [MEMORY] JSON 파싱 실패 — 저장 안 됨, 다음 턴 재시도", flush=True)
+
+    except Exception as e:
+        print(f">>> [MEMORY ERROR] {type(e).__name__}: {e}", flush=True)
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -124,21 +130,21 @@ def chat(req: ChatRequest):
     if req.npc not in VALID_NPCS:
         raise HTTPException(status_code=400, detail=f"Unknown NPC: {req.npc}")
 
-    # 2. Get latest user message for RAG query
+    # 2. 최신 유저 메시지
     user_message = req.messages[-1].content
 
-    # 2-1. ← 추가: 유저 발화를 메모리에 저장
+    # 2-1. 유저 발화 저장
     store.add_message(req.session_id, req.npc, "user", user_message)
 
-    # 3. Retrieve relevant story context from ChromaDB
+    # 3. RAG 검색
     context = retrieve_context(user_message, req.npc)
 
-    # 3-1. ← 추가: 메모리에서 맥락 로드
-    summary = store.get_summary(req.session_id)                       # 누적 요약
-    facts = store.get_facts(req.session_id)                           # 유저가 알아낸 단서
-    recent = store.get_recent_messages(req.session_id, npc=req.npc, limit=6)  # 이 NPC와의 최근 대화
+    # 3-1. 메모리 로드
+    summary = store.get_summary(req.session_id)
+    facts = store.get_facts(req.session_id)
+    recent = store.get_recent_messages(req.session_id, npc=req.npc, limit=6)
 
-    # 4. Build enriched system prompt
+    # 4. 시스템 프롬프트 구성
     system_prompt = NPC_SYSTEMS[req.npc]
 
     if context:
@@ -148,7 +154,6 @@ def chat(req: ChatRequest):
 {context}
 """
 
-    # 4-1. ← 추가: 메모리 맥락을 프롬프트에 주입
     if summary:
         system_prompt += f"""
 
@@ -166,14 +171,11 @@ def chat(req: ChatRequest):
 
     system_prompt += "\n/no_think"
 
-    # 5. Call LM Studio
+    # 5. LM Studio 호출
     if MOCK_MODE:
         reply = f"[MOCK] {req.npc} | RAG:{'있음' if context else '없음'} | 요약:{'있음' if summary else '없음'} | facts:{len(facts)}개"
     else:
-        # 최근 대화(메모리) + 이번 턴을 함께 전달
-        # Unity가 보낸 req.messages 대신 서버 메모리 기준으로 재구성 → 세션 지속성 확보
         convo_messages = [{"role": m["role"], "content": m["content"]} for m in recent]
-
         response = client.chat.completions.create(
             model=LM_STUDIO_MODEL,
             messages=[
@@ -186,10 +188,10 @@ def chat(req: ChatRequest):
             reply = "..."
         reply = reply.strip()
 
-    # 5-1. ← 추가: NPC 응답도 메모리에 저장
+    # 5-1. NPC 응답 저장
     store.add_message(req.session_id, req.npc, "assistant", reply)
 
-    # 5-2. ← 추가: 주기적으로 요약 + facts 갱신
+    # 5-2. 요약 + facts 갱신
     _maybe_update_memory(req.session_id)
 
     return ChatResponse(reply=reply, npc=req.npc)

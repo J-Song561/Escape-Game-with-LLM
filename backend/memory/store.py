@@ -45,12 +45,19 @@ def init_db():
     # 세션 메타 (요약 저장)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
-            session_id TEXT PRIMARY KEY,
-            summary    TEXT DEFAULT '',
-            created_at TEXT,
-            updated_at TEXT
+            session_id      TEXT PRIMARY KEY,
+            summary         TEXT DEFAULT '',
+            last_summary_at INTEGER DEFAULT 0,
+            created_at      TEXT,
+            updated_at      TEXT
         )
     """)
+
+    # 기존 DB에 last_summary_at 컬럼이 없으면 추가 (마이그레이션)
+    cur.execute("PRAGMA table_info(sessions)")
+    columns = [row["name"] for row in cur.fetchall()]
+    if "last_summary_at" not in columns:
+        cur.execute("ALTER TABLE sessions ADD COLUMN last_summary_at INTEGER DEFAULT 0")
 
     # 대화 기록
     cur.execute("""
@@ -194,3 +201,26 @@ def count_messages(session_id: str) -> int:
     row = cur.fetchone()
     conn.close()
     return row["c"] if row else 0
+
+
+def get_last_summary_at(session_id: str) -> int:
+    """마지막으로 요약이 성공한 시점의 '총 메시지 수'. 없으면 0."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute("SELECT last_summary_at FROM sessions WHERE session_id = ?", (session_id,))
+    row = cur.fetchone()
+    conn.close()
+    return row["last_summary_at"] if row and row["last_summary_at"] is not None else 0
+
+
+def set_last_summary_at(session_id: str, count: int):
+    """요약이 성공했을 때, 그 시점의 총 메시지 수를 기록."""
+    _ensure_session(session_id)
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE sessions SET last_summary_at = ? WHERE session_id = ?",
+        (count, session_id),
+    )
+    conn.commit()
+    conn.close()
