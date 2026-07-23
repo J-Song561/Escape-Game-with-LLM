@@ -4,7 +4,7 @@ from openai import OpenAI
 
 from config import LM_STUDIO_BASE_URL, LM_STUDIO_MODEL
 from models.schemas import ChatRequest, ChatResponse
-from npc.prompts import NPC_SYSTEMS
+from npc.prompts import NPC_SYSTEMS, HARD_RULES
 from npc.npc_list import VALID_NPCS
 from rag.retriever import retrieve_context
 from memory import store
@@ -217,7 +217,7 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks):
 {facts_text}
 """
 
-    system_prompt += "\n/no_think"
+    system_prompt += HARD_RULES + "\n/no_think"
 
     # 5. LM Studio 호출
     if MOCK_MODE:
