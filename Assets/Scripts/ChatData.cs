@@ -12,6 +12,7 @@ public class ChatRequest
 {
     public string npc;
     public Message[] messages;
+    public string session_id;
 }
 
 [Serializable]
