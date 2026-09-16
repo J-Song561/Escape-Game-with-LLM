@@ -26,23 +26,11 @@ public class ChatManager : MonoBehaviour
 
     // ─────────────────────────────────────────────
     // 세션 ID — NPC 4명이 반드시 같은 값을 써야 한다.
-    // static이라 ChatManager가 몇 개든 하나만 생성된다.
-    // 나중에 GameSession.cs를 만들면 아래 SessionId를
-    // GameSession.Instance.SessionId 로 교체하면 된다.
+    // 게임 플레이가 시작되면 GameSession이 자동으로 SessionId를
+    // 발급하고, 씬이 바뀌어도 유지한다. ChatManager는 그 값을
+    // 그대로 참조하기만 하면 되므로 여기서 별도로 생성하지 않는다.
     // ─────────────────────────────────────────────
-    private static string _sessionId;
-    private static string SessionId
-    {
-        get
-        {
-            if (string.IsNullOrEmpty(_sessionId))
-            {
-                _sessionId = System.Guid.NewGuid().ToString();
-                Debug.Log($"[ChatManager] 세션 시작: {_sessionId}");
-            }
-            return _sessionId;
-        }
-    }
+    private static string SessionId => GameSession.Instance.SessionId;
 
     private readonly List<string> lines = new List<string>();
     private bool isWaiting = false;
