@@ -12,6 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e4ce4f6d3790f8545a342b1bf357a743, type: 3}
   m_Name: Family
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
-  clueName: Family
+  clueName: "\uB2E8\uCCB4 \uC0AC\uC9C4"
   icon: {fileID: -1419059058, guid: 5d55f5a204c47d54ea53498312da1238, type: 3}
-  description: "\uC5D8\uB77C \uAC00\uBB38\uC758 \uAC00\uC871 \uC0AC\uC9C4\uC774\uB2E4."
+  description: "\uC800\uD0DD \uC0AC\uB78C\uB4E4\uC758 \uB2E8\uCCB4\uC0AC\uC9C4. \uB8E8\uC774\uC2A4\uC640\uC740
+    \uC0AC\uC9C4\uC774\uB2E4. \uB9C8\uB9AC\uC544\uB3C4 \uD568\uAED8 \uCC0D"

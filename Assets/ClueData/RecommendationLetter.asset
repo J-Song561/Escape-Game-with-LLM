@@ -14,4 +14,6 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
   clueName: "\uCC44\uC6A9 \uCD94\uCC9C\uC11C"
   icon: {fileID: -303593558, guid: 10dee5493833de345ae345c1ccec1fce, type: 3}
-  description: "\uB9C8\uB9AC\uC544\uC758 \uCC44\uC6A9 \uCD94\uCC9C\uC11C\uC774\uB2E4."
+  description: "\uB9C8\uB9AC\uC544\uC758 \uCC44\uC6A9 \uCD94\uCC9C\uC11C\uC774\uB2E4.
+    \uC785\uC774 \uBB34\uAC81\uACE0 \uC2DC\uD0A4\uB294 \uC77C\uC740 \uC798 \uD574\uB0B4\uC9C0\uB9CC
+    \uC815\uC774 \uB9CE\uB2E4\uACE0 \uC4F0\uC5EC \uC788\uB2E4.  "

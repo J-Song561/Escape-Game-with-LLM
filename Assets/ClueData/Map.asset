@@ -12,7 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e4ce4f6d3790f8545a342b1bf357a743, type: 3}
   m_Name: Map
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
-  clueName: Map
+  clueName: "\uC9C0\uB3C4"
   icon: {fileID: 989975882, guid: 8f15641a7b9537249a36c7c1a2250597, type: 3}
-  description: "\uC800\uD0DD\uC758 \uAD6C\uC870\uB3C4\uB2E4. X \uD45C\uC2DC\uAC00
-    \uCCD0\uC9C4 \uACF3\uC740 \uBB50\uC9C0...?"
+  description: "\uC800\uD0DD 1\uCE35\uC758 \uAD6C\uC870\uB3C4\uB2E4. X \uD45C\uC2DC\uAC00
+    \uCCD0\uC9C4 \uACF3\uC740 \uBB50\uC9C0?"

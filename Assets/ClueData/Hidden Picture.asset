@@ -12,7 +12,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e4ce4f6d3790f8545a342b1bf357a743, type: 3}
   m_Name: Hidden Picture
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
-  clueName: Hidden
+  clueName: "\uCC22\uC5B4\uC9C4 \uC0AC\uC9C4"
   icon: {fileID: 1509065439, guid: 5f54a3f5bf963e44590c89fe1b4c0921, type: 3}
-  description: "\uC5B4\uB9B0 \uC2DC\uC808 \uB0B4\uAC00 \uD65C\uC9DD \uC6C3\uACE0
-    \uC788\uB2E4. \uC606\uC5D0 \uC788\uB294 \uC0AC\uB78C\uC740 \uB204\uAD6C\uC9C0?"
+  description: "\uAC00\uC6B4\uB370\uAC00 \uCC22\uC5B4\uC9C4 \uC0AC\uC9C4\uC774\uB2E4.
+    \uC5B4\uB9B0 \uC5EC\uC790\uC544\uC774\uC640 \uD55C \uB0A8\uC790\uAC00 \uBC1D\uAC8C
+    \uC6C3\uACE0 \uC788\uB2E4."

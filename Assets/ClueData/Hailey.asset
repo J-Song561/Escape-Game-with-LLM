@@ -12,6 +12,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: e4ce4f6d3790f8545a342b1bf357a743, type: 3}
   m_Name: Hailey
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
-  clueName: "\uD5E4\uC77C\uB9AC \uC0AC\uC9C4"
+  clueName: "\uD5E4\uC77C\uB9AC\uC758 \uC0AC\uC9C4"
   icon: {fileID: -195550793, guid: d6d31b02ffe30b64bb55939e9da63666, type: 3}
-  description: "\uD5E4\uC77C\uB9AC\uC758 \uC5B4\uB9B0 \uC2DC\uC808 \uC0AC\uC9C4\uC774\uB2E4."
+  description: "\uC5B4\uB9B0 \uD5E4\uC77C\uB9AC\uC758 \uBAA8\uC2B5\uC744 \uB2F4\uC740
+    \uC0AC\uC9C4\uC774\uB2E4."

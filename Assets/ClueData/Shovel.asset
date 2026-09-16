@@ -14,5 +14,5 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
   clueName: "\uC0BD"
   icon: {fileID: 2111737098, guid: af3b252d5cecd014cbf93cc4d747f577, type: 3}
-  description: "\uC0BD\uC774\uB2E4. \uC5B4\uB518\uAC00 \uC4F8\uBAA8\uAC00 \uC788\uC744
-    \uAC70 \uAC19\uB2E4."
+  description: "\uB2E8\uB2E8\uD55C \uAE08\uC18D \uC0BD. \uB545\uC744 \uD30C\uACE0
+    \uC815\uC6D0\uC744 \uAC00\uAFB8\uB294 \uB370 \uC720\uC6A9\uD574 \uBCF4\uC778\uB2E4."

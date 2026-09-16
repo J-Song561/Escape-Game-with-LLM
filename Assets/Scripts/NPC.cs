@@ -6,6 +6,8 @@ public class NPC : MonoBehaviour
     public GameObject talkUI;
     public GameObject hintUI;
 
+    public PlayerController playerController;
+
     public float distance = 2f;
 
     void Update()
@@ -18,7 +20,11 @@ public class NPC : MonoBehaviour
 
         if (canTalk && Input.GetKeyDown(KeyCode.E))
         {
-            talkUI.SetActive(!talkUI.activeSelf);
+            bool isOpening = !talkUI.activeSelf;
+            talkUI.SetActive(isOpening);
+
+            if (playerController != null)
+                playerController.canControl = !isOpening;
         }
     }
 }

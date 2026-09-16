@@ -10,8 +10,9 @@ MonoBehaviour:
   m_Enabled: 1
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e4ce4f6d3790f8545a342b1bf357a743, type: 3}
-  m_Name: Key
+  m_Name: Safe
   m_EditorClassIdentifier: Assembly-CSharp::ClueData
-  clueName: "\uC5F4\uC1E0"
-  icon: {fileID: -2065105985, guid: 2597c159df00699448e584e558fa7122, type: 3}
-  description: "\uD0C8\uCD9C\uD560 \uC218 \uC788\uB294 \uC5F4\uC1E0."
+  clueName: "\uAE08\uACE0"
+  icon: {fileID: 21300000, guid: 0bbea93f3763af34985b615f4ac12ff8, type: 3}
+  description: "\uC5D8\uB77C \uBD80\uC778\uC758 \uAE08\uACE0. \uC5F4\uC1E0\uAC00
+    \uC788\uB2E4\uBA74 \uC5F4 \uC218 \uC788\uC744 \uAC83 \uAC19\uB2E4."

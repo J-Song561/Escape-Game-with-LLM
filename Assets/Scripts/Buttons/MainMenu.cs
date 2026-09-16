@@ -6,7 +6,8 @@ public class MainMenu : MonoBehaviour
     // Start Game
     public void StartGame()
     {
-        SceneManager.LoadScene("GameScreen");
+        GameProgress.CurrentDay = 1;
+        SceneManager.LoadScene("DaySelectScreen");
     }
 
     // Quit Game
