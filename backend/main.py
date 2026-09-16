@@ -3,7 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
 from config import LM_STUDIO_BASE_URL, LM_STUDIO_MODEL
-from models.schemas import ChatRequest, ChatResponse
+from models.schemas import (
+    ChatRequest,
+    ChatResponse,
+    EndingUnlockRequest,
+    EndingRecord,
+    EndingsSummaryResponse,
+)
 from npc.prompts import NPC_SYSTEMS, HARD_RULES
 from npc.npc_list import VALID_NPCS
 from rag.retriever import retrieve_context
@@ -14,6 +20,11 @@ import json
 import re
 import threading
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
+
+# 관리자용 엔딩 조회 엔드포인트 보호용 키.
+# .env에 ADMIN_KEY=아무값 을 설정하면 /admin/endings?key=그값 으로만 조회 가능.
+# 설정 안 하면(전시 기간 중 내부망에서만 쓰는 경우 등) 그냥 열려있음.
+ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
 app = FastAPI()
 
@@ -245,3 +256,37 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(_maybe_update_memory, req.session_id)
 
     return ChatResponse(reply=reply, npc=req.npc)
+
+
+# ── 엔딩 수집함 ──────────────────────────────
+
+@app.post("/endings/unlock")
+def unlock_ending(req: EndingUnlockRequest):
+    """
+    방문자(세션)가 엔딩에 도달하면 Unity에서 호출.
+    같은 세션에서 같은 엔딩을 재시도로 또 봐도 중복 저장되지 않는다.
+    """
+    store.unlock_ending(req.session_id, req.ending_id)
+    return {"status": "ok", "session_id": req.session_id, "ending_id": req.ending_id}
+
+
+@app.get("/endings/session/{session_id}")
+def get_session_endings(session_id: str):
+    """이 방문자(세션)가 지금까지 해금한 엔딩 목록 — 엔딩수집함 UI용."""
+    return {"session_id": session_id, "endings": store.get_endings(session_id)}
+
+
+@app.get("/admin/endings", response_model=EndingsSummaryResponse)
+def admin_endings(key: str = ""):
+    """
+    관리자용 — 전시장에서 나온 모든 방문자(세션)의 엔딩 해금 기록 전체 조회.
+    ADMIN_KEY가 설정되어 있으면 ?key=... 가 일치해야만 조회 가능.
+    """
+    if ADMIN_KEY and key != ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    records = store.get_all_endings()
+    return EndingsSummaryResponse(
+        total_unlocks=len(records),
+        records=[EndingRecord(**r) for r in records],
+    )
