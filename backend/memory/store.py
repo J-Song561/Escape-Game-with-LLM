@@ -7,6 +7,7 @@ memory/store.py
   1. conversation history  — 세션별 전체 대화 (role, content, npc)
   2. known_facts           — 유저가 알아낸 단서/사실 (NPC가 "이미 아시는군요" 반응 가능)
   3. summary               — 대화가 길어지면 압축한 요약
+  4. endings               — 세션(방문자)별로 해금한 엔딩 기록 (엔딩수집함 + 관리자 전체 조회용)
 
 SQLite를 쓰는 이유:
   게임을 껐다 켜도 세션 기억이 남아야 하기 때문.
@@ -38,6 +39,7 @@ def init_db():
       sessions  — 세션별 메타데이터 (요약 등)
       messages  — 세션별 대화 기록
       facts     — 세션별 유저가 알아낸 단서
+      endings   — 세션별 해금한 엔딩 기록
     """
     conn = _connect()
     cur = conn.cursor()
@@ -80,6 +82,16 @@ def init_db():
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT,
             fact       TEXT,
+            created_at TEXT
+        )
+    """)
+
+    # 세션(방문자)별 해금한 엔딩
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS endings (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT,
+            ending_id  TEXT,
             created_at TEXT
         )
     """)
@@ -271,3 +283,57 @@ def reset_fail_count(session_id: str):
     )
     conn.commit()
     conn.close()
+
+
+# ── 엔딩 수집함 ──────────────────────────────
+
+def unlock_ending(session_id: str, ending_id: str):
+    """
+    엔딩 해금 기록.
+    같은 세션에서 같은 엔딩을 여러 번 봐도 중복 저장하지 않는다
+    (재시도해서 같은 엔딩을 또 봐도 기록은 한 번만 남음).
+    """
+    _ensure_session(session_id)
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id FROM endings WHERE session_id = ? AND ending_id = ?",
+        (session_id, ending_id),
+    )
+    if cur.fetchone() is None:
+        now = datetime.utcnow().isoformat()
+        cur.execute(
+            "INSERT INTO endings (session_id, ending_id, created_at) VALUES (?, ?, ?)",
+            (session_id, ending_id, now),
+        )
+        conn.commit()
+    conn.close()
+
+
+def get_endings(session_id: str) -> List[str]:
+    """한 세션(방문자)이 해금한 엔딩 id 목록 (도달한 순서대로)."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT ending_id FROM endings WHERE session_id = ? ORDER BY id ASC",
+        (session_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [r["ending_id"] for r in rows]
+
+
+def get_all_endings() -> List[Dict]:
+    """
+    관리자용 — 전시장에서 나온 모든 세션(방문자)의 엔딩 해금 기록 전체.
+    시간순 정렬. session_id로 묶어서 방문자별로 보고 싶으면 호출부에서 groupby 하면 됨.
+    """
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT session_id, ending_id, created_at AS unlocked_at "
+        "FROM endings ORDER BY created_at ASC"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
