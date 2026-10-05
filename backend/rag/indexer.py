@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import chromadb
 from rag.embedder import get_embedding
 
@@ -66,5 +67,26 @@ def index_story_files():
 
     print(f"Done. Total chunks indexed: {total_chunks}")
 
+
+def check_index():
+    """재구축 없이 지금 ChromaDB 상태만 확인한다 (story/*.md 기준 NPC 목록 사용)."""
+    npc_ids = sorted(
+        f.replace(".md", "")
+        for f in os.listdir(STORY_DIR)
+        if f.endswith(".md")
+    )
+
+    print("=== 현재 ChromaDB 상태 ===")
+    for npc_id in npc_ids:
+        res = collection.get(where={"npc": npc_id})
+        n = len(res["ids"])
+        preview = (res["documents"][0][:60] + "...") if res["documents"] else "(없음)"
+        print(f"- {npc_id}: {n}개 청크 | 미리보기: {preview}")
+    print(f"전체: {collection.count()}개")
+
+
 if __name__ == "__main__":
-    index_story_files()
+    if "--check" in sys.argv:
+        check_index()
+    else:
+        index_story_files()
