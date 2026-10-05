@@ -19,6 +19,10 @@ import os
 import json
 import re
 import threading
+
+from dotenv import load_dotenv
+load_dotenv()
+
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
 # 관리자용 엔딩 조회 엔드포인트 보호용 키.
