@@ -9,6 +9,9 @@ from models.schemas import (
     EndingUnlockRequest,
     EndingRecord,
     EndingsSummaryResponse,
+    AffinityResponse,
+    AffinityRecord,
+    SessionAffinityResponse,
 )
 from npc.prompts import NPC_SYSTEMS, HARD_RULES
 from npc.npc_list import VALID_NPCS
@@ -16,13 +19,12 @@ from rag.retriever import retrieve_context
 from memory import store
 
 import os
-import json
-import re
-import threading
-
 from dotenv import load_dotenv
 load_dotenv()
 
+import json
+import re
+import threading
 MOCK_MODE = os.getenv("MOCK_MODE", "false").lower() == "true"
 
 # 관리자용 엔딩 조회 엔드포인트 보호용 키.
@@ -52,20 +54,26 @@ SUMMARY_EVERY = 6
 # 요약이 연속 이만큼 실패하면 그 구간은 포기하고 넘어감 (무한 재시도 방지)
 MAX_SUMMARY_FAILS = 3
 
+# 같은 NPC와 몇 턴마다 호감도를 재판단할지
+AFFINITY_EVERY = 4
+
+# 이 점수(0~100) 이상이면 "열쇠 위치 공개" 조건 충족 (사이드퀘스트)
+AFFINITY_THRESHOLD = 70
+
 # ── 세션별 락 ──
-# 같은 세션에서 요약이 동시에 두 번 도는 것을 막는다.
-# 백그라운드로 요약을 던지면 이론상 겹칠 수 있으므로,
-# 세션마다 락을 하나씩 두고 "이미 요약 중이면 스킵"한다.
+# 같은 세션에서 요약/호감도 판단이 동시에 두 번 도는 것을 막는다.
+# 백그라운드로 던지면 이론상 겹칠 수 있으므로,
+# (세션, 작업종류) 조합마다 락을 하나씩 두고 "이미 처리 중이면 스킵"한다.
 _session_locks = {}
 _locks_guard = threading.Lock()  # _session_locks 딕셔너리 자체를 보호
 
 
-def _get_session_lock(session_id: str) -> threading.Lock:
-    """세션별 락 객체를 가져온다 (없으면 생성)."""
+def _get_session_lock(key: str) -> threading.Lock:
+    """키별 락 객체를 가져온다 (없으면 생성). 세션 요약은 session_id, 호감도는 'session_id:npc:affinity' 형태로 사용."""
     with _locks_guard:
-        if session_id not in _session_locks:
-            _session_locks[session_id] = threading.Lock()
-        return _session_locks[session_id]
+        if key not in _session_locks:
+            _session_locks[key] = threading.Lock()
+        return _session_locks[key]
 
 
 @app.get("/health")
@@ -187,6 +195,81 @@ def _maybe_update_memory(session_id: str):
         lock.release()
 
 
+def _maybe_update_affinity(session_id: str, npc_id: str):
+    """
+    이 NPC와 AFFINITY_EVERY턴 이상 새로 대화했으면, 최근 대화 내용을 바탕으로
+    LLM에게 호감도 점수(0~100)를 다시 판단시켜 저장한다.
+    백그라운드에서 실행되며, (세션, NPC) 조합 락으로 중복 실행을 방지한다.
+    """
+    lock_key = f"{session_id}:{npc_id}:affinity"
+    lock = _get_session_lock(lock_key)
+
+    if not lock.acquire(blocking=False):
+        print(f">>> [AFFINITY] {session_id}/{npc_id} 이미 판단 중 — 스킵", flush=True)
+        return
+
+    try:
+        total = store.count_messages_by_npc(session_id, npc_id)
+        last = store.get_last_affinity_update_at(session_id, npc_id)
+        new_messages = total - last
+
+        if new_messages < AFFINITY_EVERY:
+            return
+        if MOCK_MODE:
+            return
+
+        current_score = store.get_affinity(session_id, npc_id)
+        history = store.get_recent_messages(session_id, npc=npc_id, limit=AFFINITY_EVERY * 2)
+        convo_text = "\n".join(f"[{m['role']}] {m['content']}" for m in history)
+
+        system_prompt = (
+            "너는 추리 게임 속 NPC와 유저 사이의 호감도를 평가하는 분석기다. "
+            f"NPC '{npc_id}'에 대한 유저의 현재 호감도 점수는 {current_score}점(0~100 범위)이다. "
+            "호감도는 '예의 바른 말투'가 아니라 '얼마나 진정성 있게 이 NPC 개인에게 관심을 가졌는가'로 "
+            "평가해야 한다. 형식적으로 존댓말만 쓰거나 인사치레만 하는 대화는 점수를 올리면 안 된다.\n\n"
+            "아래 기준으로 판단하라:\n"
+            "- 점수를 올려야 하는 경우: 유저가 이 NPC의 과거·감정·고민에 대해 구체적으로 묻거나, "
+            "NPC가 털어놓은 이야기에 진심으로 공감하거나, NPC가 처한 상황을 배려하는 태도를 보인 경우\n"
+            "- 점수를 올리면 안 되는 경우: 단순히 공손한 말투만 쓰는 경우, 단서/정보 캐내기에만 집중하고 "
+            "NPC 개인에는 관심이 없는 경우, 의례적인 인사나 추임새만 반복하는 경우\n"
+            "- 점수를 내려야 하는 경우: 무례하거나 공격적인 경우, NPC를 추궁·의심하는 투로 몰아붙이는 경우\n\n"
+            "변화는 점진적이어야 한다 (한 번 판단에 현재 점수에서 ±15점 이내로만 움직여라). "
+            "반드시 아래 JSON 형식으로만 답하라. 다른 말은 절대 붙이지 마라.\n\n"
+            "{\n"
+            '  "score": 0부터 100 사이의 정수\n'
+            "}\n/no_think"
+        )
+
+        try:
+            resp = client.chat.completions.create(
+                model=LM_STUDIO_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": convo_text},
+                ],
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = _extract_json(raw)
+            print(f">>> [AFFINITY] {npc_id} raw 응답: {raw[:200]}", flush=True)
+
+            if data and "score" in data:
+                new_score = int(data["score"])
+                store.set_affinity(session_id, npc_id, new_score)
+                print(f">>> [AFFINITY] {npc_id} 호감도 {current_score} → {new_score}", flush=True)
+            else:
+                print(f">>> [AFFINITY] {npc_id} JSON 파싱 실패, 점수 유지", flush=True)
+
+            store.set_last_affinity_update_at(session_id, npc_id, total)
+
+        except Exception as e:
+            print(f">>> [AFFINITY ERROR] {type(e).__name__}: {e}", flush=True)
+            # 실패해도 카운터는 갱신해서 다음 AFFINITY_EVERY 턴까지 재시도를 미룸 (무한 재시도 방지)
+            store.set_last_affinity_update_at(session_id, npc_id, total)
+
+    finally:
+        lock.release()
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, background_tasks: BackgroundTasks):
     # 1. Validate NPC
@@ -259,6 +342,9 @@ def chat(req: ChatRequest, background_tasks: BackgroundTasks):
     #      → 응답(task1)과 요약(task2)의 분리 + 응답 지연 제거
     background_tasks.add_task(_maybe_update_memory, req.session_id)
 
+    # 5-3. 호감도 갱신도 백그라운드로 던짐 (이 NPC와의 대화 기준)
+    background_tasks.add_task(_maybe_update_affinity, req.session_id, req.npc)
+
     return ChatResponse(reply=reply, npc=req.npc)
 
 
@@ -293,4 +379,33 @@ def admin_endings(key: str = ""):
     return EndingsSummaryResponse(
         total_unlocks=len(records),
         records=[EndingRecord(**r) for r in records],
+    )
+
+
+# ── 호감도 ──────────────────────────────
+
+@app.get("/affinity/{session_id}/{npc}", response_model=AffinityResponse)
+def get_npc_affinity(session_id: str, npc: str):
+    """
+    특정 세션(방문자)의 특정 NPC에 대한 호감도 조회.
+    reveal_key가 true면 그 NPC가 열쇠 위치를 알려줄 조건을 충족한 것 (사이드퀘스트).
+    """
+    score = store.get_affinity(session_id, npc)
+    return AffinityResponse(
+        session_id=session_id,
+        npc=npc,
+        score=score,
+        threshold=AFFINITY_THRESHOLD,
+        reveal_key=score >= AFFINITY_THRESHOLD,
+    )
+
+
+@app.get("/affinity/{session_id}", response_model=SessionAffinityResponse)
+def get_session_affinity(session_id: str):
+    """특정 세션(방문자)의 NPC별 호감도 전체 조회."""
+    records = store.get_all_affinity(session_id)
+    return SessionAffinityResponse(
+        session_id=session_id,
+        threshold=AFFINITY_THRESHOLD,
+        affinities=[AffinityRecord(**r) for r in records],
     )

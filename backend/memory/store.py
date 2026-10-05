@@ -8,6 +8,7 @@ memory/store.py
   2. known_facts           — 유저가 알아낸 단서/사실 (NPC가 "이미 아시는군요" 반응 가능)
   3. summary               — 대화가 길어지면 압축한 요약
   4. endings               — 세션(방문자)별로 해금한 엔딩 기록 (엔딩수집함 + 관리자 전체 조회용)
+  5. affinity              — 세션(방문자)별 · NPC별 호감도 (사이드퀘스트: 열쇠 위치 공개 조건)
 
 SQLite를 쓰는 이유:
   게임을 껐다 켜도 세션 기억이 남아야 하기 때문.
@@ -40,6 +41,7 @@ def init_db():
       messages  — 세션별 대화 기록
       facts     — 세션별 유저가 알아낸 단서
       endings   — 세션별 해금한 엔딩 기록
+      affinity  — 세션별 · NPC별 호감도 점수
     """
     conn = _connect()
     cur = conn.cursor()
@@ -93,6 +95,18 @@ def init_db():
             session_id TEXT,
             ending_id  TEXT,
             created_at TEXT
+        )
+    """)
+
+    # 세션(방문자)별 · NPC별 호감도
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS affinity (
+            session_id        TEXT,
+            npc               TEXT,
+            score             INTEGER DEFAULT 0,
+            last_update_count INTEGER DEFAULT 0,
+            updated_at        TEXT,
+            PRIMARY KEY (session_id, npc)
         )
     """)
 
@@ -337,3 +351,107 @@ def get_all_endings() -> List[Dict]:
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── 호감도(NPC 신뢰도) ──────────────────────────────
+# 특정 NPC와의 대화 내용(LLM 판단)을 바탕으로 세션 × NPC별 호감도(0~100)를 쌓는다.
+# 사이드퀘스트: 특정 NPC의 호감도가 임계치를 넘으면 그 NPC가 열쇠 위치를 알려준다.
+
+def _ensure_affinity_row(session_id: str, npc: str):
+    """세션-NPC 호감도 행이 없으면 0점으로 새로 만든다."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT session_id FROM affinity WHERE session_id = ? AND npc = ?",
+        (session_id, npc),
+    )
+    if cur.fetchone() is None:
+        now = datetime.utcnow().isoformat()
+        cur.execute(
+            "INSERT INTO affinity (session_id, npc, score, last_update_count, updated_at) "
+            "VALUES (?, ?, 0, 0, ?)",
+            (session_id, npc, now),
+        )
+        conn.commit()
+    conn.close()
+
+
+def get_affinity(session_id: str, npc: str) -> int:
+    """세션-NPC 호감도 점수 (0~100). 없으면 0."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT score FROM affinity WHERE session_id = ? AND npc = ?",
+        (session_id, npc),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row["score"] if row else 0
+
+
+def set_affinity(session_id: str, npc: str, score: int):
+    """호감도 점수 갱신 (절대값으로 덮어씀, 0~100으로 clamp)."""
+    _ensure_affinity_row(session_id, npc)
+    score = max(0, min(100, score))
+    conn = _connect()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute(
+        "UPDATE affinity SET score = ?, updated_at = ? WHERE session_id = ? AND npc = ?",
+        (score, now, session_id, npc),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_affinity(session_id: str) -> List[Dict]:
+    """이 세션의 NPC별 호감도 전체 (유니티가 한 번에 조회할 때 사용)."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT npc, score FROM affinity WHERE session_id = ?",
+        (session_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def count_messages_by_npc(session_id: str, npc: str) -> int:
+    """특정 NPC와 나눈 메시지 수 (호감도 판단 트리거 기준)."""
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) AS c FROM messages WHERE session_id = ? AND npc = ?",
+        (session_id, npc),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row["c"] if row else 0
+
+
+def get_last_affinity_update_at(session_id: str, npc: str) -> int:
+    """마지막으로 호감도를 판단한 시점의 '이 NPC와의 총 메시지 수'. 없으면 0."""
+    _ensure_affinity_row(session_id, npc)
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT last_update_count FROM affinity WHERE session_id = ? AND npc = ?",
+        (session_id, npc),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row["last_update_count"] if row and row["last_update_count"] is not None else 0
+
+
+def set_last_affinity_update_at(session_id: str, npc: str, count: int):
+    """호감도 판단이 끝났을 때, 그 시점의 '이 NPC와의 총 메시지 수'를 기록."""
+    _ensure_affinity_row(session_id, npc)
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE affinity SET last_update_count = ? WHERE session_id = ? AND npc = ?",
+        (count, session_id, npc),
+    )
+    conn.commit()
+    conn.close()

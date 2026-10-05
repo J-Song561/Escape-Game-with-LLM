@@ -33,3 +33,27 @@ class EndingRecord(BaseModel):
 class EndingsSummaryResponse(BaseModel):
     total_unlocks: int
     records: List[EndingRecord]
+
+
+# ── 호감도(NPC 신뢰도) ──────────────────────────────
+# LLM과의 자유 대화 내용을 바탕으로 세션(방문자)별 · NPC별 호감도를 추적한다.
+# 특정 NPC의 호감도가 임계치를 넘으면 그 NPC가 열쇠 위치를 알려주는 식으로 활용 예정.
+# (대상 NPC는 아직 미정이라 전 NPC 공통으로 동작하게 설계)
+
+class AffinityResponse(BaseModel):
+    session_id: str
+    npc: str
+    score: int              # 0~100
+    threshold: int          # 이 값 이상이면 reveal_key = True
+    reveal_key: bool        # 유니티가 바로 분기에 쓸 수 있도록 미리 계산해서 내려줌
+
+
+class AffinityRecord(BaseModel):
+    npc: str
+    score: int
+
+
+class SessionAffinityResponse(BaseModel):
+    session_id: str
+    threshold: int
+    affinities: List[AffinityRecord]
