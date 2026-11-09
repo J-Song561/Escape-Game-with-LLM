@@ -5,8 +5,11 @@ memory/store.py
 
 저장하는 것:
   1. conversation history  — 세션별 전체 대화 (role, content, npc)
-  2. known_facts           — 유저가 알아낸 단서/사실 (NPC가 "이미 아시는군요" 반응 가능)
-  3. summary               — 대화가 길어지면 압축한 요약
+  2. known_facts           — 유저가 알아낸 단서/사실 (NPC별로 따로 저장. NPC가 "이미 아시는군요" 반응 가능)
+  3. summary               — 대화가 길어지면 압축한 요약 (NPC별로 따로 저장)
+
+  facts와 summary를 NPC별로 나누는 이유:
+    유저가 마리아에게만 한 말을 엘라가 알고 반응하면 안 되기 때문.
   4. endings               — 세션(방문자)별로 해금한 엔딩 기록 (엔딩수집함 + 관리자 전체 조회용)
   5. affinity              — 세션(방문자)별 · NPC별 호감도 (사이드퀘스트: 열쇠 위치 공개 조건)
 
@@ -37,9 +40,10 @@ def init_db():
     서버 시작 시 1회 호출. 테이블이 없으면 생성.
 
     테이블 구조:
-      sessions  — 세션별 메타데이터 (요약 등)
-      messages  — 세션별 대화 기록
-      facts     — 세션별 유저가 알아낸 단서
+      sessions   — 세션별 메타데이터 (예전 세션 단위 요약 컬럼은 더 이상 쓰지 않음)
+      messages   — 세션별 대화 기록
+      facts      — 세션별 · NPC별 유저가 알아낸 단서
+      npc_memory — 세션별 · NPC별 대화 요약
       endings   — 세션별 해금한 엔딩 기록
       affinity  — 세션별 · NPC별 호감도 점수
     """
@@ -85,6 +89,26 @@ def init_db():
             session_id TEXT,
             fact       TEXT,
             created_at TEXT
+        )
+    """)
+
+    # 기존 facts 테이블에 npc 컬럼이 없으면 추가 (마이그레이션)
+    # 예전 행은 npc가 ''로 남아서 어느 NPC 프롬프트에도 들어가지 않는다.
+    cur.execute("PRAGMA table_info(facts)")
+    fact_columns = [row["name"] for row in cur.fetchall()]
+    if "npc" not in fact_columns:
+        cur.execute("ALTER TABLE facts ADD COLUMN npc TEXT DEFAULT ''")
+
+    # NPC별 대화 요약 (세션 × NPC)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS npc_memory (
+            session_id         TEXT,
+            npc                TEXT,
+            summary            TEXT DEFAULT '',
+            last_summary_at    INTEGER DEFAULT 0,
+            summary_fail_count INTEGER DEFAULT 0,
+            updated_at         TEXT,
+            PRIMARY KEY (session_id, npc)
         )
     """)
 
@@ -171,132 +195,126 @@ def get_recent_messages(session_id: str, npc: Optional[str] = None, limit: int =
     return [dict(r) for r in reversed(rows)]
 
 
-def get_summary(session_id: str) -> str:
-    """세션의 대화 요약 반환 (없으면 빈 문자열)."""
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT summary FROM sessions WHERE session_id = ?", (session_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row["summary"] if row else ""
+# ── 유저가 알아낸 단서 (NPC별) ──────────────────────────────
 
-
-def set_summary(session_id: str, summary: str):
-    """세션 요약 갱신."""
+def add_fact(session_id: str, npc: str, fact: str):
+    """이 NPC와의 대화에서 유저가 알아낸 단서 저장 (같은 NPC 안에서 중복 방지)."""
     _ensure_session(session_id)
     conn = _connect()
     cur = conn.cursor()
-    now = datetime.utcnow().isoformat()
     cur.execute(
-        "UPDATE sessions SET summary = ?, updated_at = ? WHERE session_id = ?",
-        (summary, now, session_id),
+        "SELECT id FROM facts WHERE session_id = ? AND npc = ? AND fact = ?",
+        (session_id, npc, fact),
     )
-    conn.commit()
-    conn.close()
-
-
-def add_fact(session_id: str, fact: str):
-    """유저가 알아낸 단서 저장 (중복 방지)."""
-    _ensure_session(session_id)
-    conn = _connect()
-    cur = conn.cursor()
-    # 이미 있는 fact면 저장 안 함
-    cur.execute("SELECT id FROM facts WHERE session_id = ? AND fact = ?", (session_id, fact))
     if cur.fetchone() is None:
         now = datetime.utcnow().isoformat()
         cur.execute(
-            "INSERT INTO facts (session_id, fact, created_at) VALUES (?, ?, ?)",
-            (session_id, fact, now),
+            "INSERT INTO facts (session_id, npc, fact, created_at) VALUES (?, ?, ?, ?)",
+            (session_id, npc, fact, now),
         )
         conn.commit()
     conn.close()
 
 
-def get_facts(session_id: str, limit: int = 20) -> List[str]:
+def get_facts(session_id: str, npc: str, limit: int = 15) -> List[str]:
     """
-    유저가 알아낸 단서 목록.
+    이 NPC와의 대화에서 유저가 알아낸 단서 목록.
     limit개까지만 반환하되, 최근에 추가된 것 우선 (프롬프트 폭발 방지).
     반환은 오래된 → 최신 순으로 정렬해 자연스럽게 읽히도록 함.
     """
     conn = _connect()
     cur = conn.cursor()
-    # 최근 것 우선으로 limit개 가져온 뒤, 다시 시간순으로 뒤집음
     cur.execute(
-        "SELECT fact FROM facts WHERE session_id = ? ORDER BY id DESC LIMIT ?",
-        (session_id, limit),
+        "SELECT fact FROM facts WHERE session_id = ? AND npc = ? ORDER BY id DESC LIMIT ?",
+        (session_id, npc, limit),
     )
     rows = cur.fetchall()
     conn.close()
     return [r["fact"] for r in reversed(rows)]
 
 
-def count_messages(session_id: str) -> int:
-    """세션 전체 메시지 수 (요약 트리거 판단용)."""
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) AS c FROM messages WHERE session_id = ?", (session_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row["c"] if row else 0
+# ── 대화 요약 (NPC별) ──────────────────────────────
 
-
-def get_last_summary_at(session_id: str) -> int:
-    """마지막으로 요약이 성공한 시점의 '총 메시지 수'. 없으면 0."""
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT last_summary_at FROM sessions WHERE session_id = ?", (session_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row["last_summary_at"] if row and row["last_summary_at"] is not None else 0
-
-
-def set_last_summary_at(session_id: str, count: int):
-    """요약이 성공했을 때, 그 시점의 총 메시지 수를 기록."""
+def _ensure_npc_memory_row(session_id: str, npc: str):
+    """세션-NPC 요약 행이 없으면 새로 만든다."""
     _ensure_session(session_id)
     conn = _connect()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE sessions SET last_summary_at = ? WHERE session_id = ?",
-        (count, session_id),
+        "SELECT session_id FROM npc_memory WHERE session_id = ? AND npc = ?",
+        (session_id, npc),
+    )
+    if cur.fetchone() is None:
+        now = datetime.utcnow().isoformat()
+        cur.execute(
+            "INSERT INTO npc_memory (session_id, npc, summary, last_summary_at, summary_fail_count, updated_at) "
+            "VALUES (?, ?, '', 0, 0, ?)",
+            (session_id, npc, now),
+        )
+        conn.commit()
+    conn.close()
+
+
+def _get_npc_memory_field(session_id: str, npc: str, field: str, default):
+    conn = _connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {field} FROM npc_memory WHERE session_id = ? AND npc = ?",
+        (session_id, npc),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if row is None or row[field] is None:
+        return default
+    return row[field]
+
+
+def _set_npc_memory_field(session_id: str, npc: str, field: str, value):
+    _ensure_npc_memory_row(session_id, npc)
+    conn = _connect()
+    cur = conn.cursor()
+    now = datetime.utcnow().isoformat()
+    cur.execute(
+        f"UPDATE npc_memory SET {field} = ?, updated_at = ? WHERE session_id = ? AND npc = ?",
+        (value, now, session_id, npc),
     )
     conn.commit()
     conn.close()
 
 
-def get_fail_count(session_id: str) -> int:
-    """요약 연속 실패 횟수."""
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute("SELECT summary_fail_count FROM sessions WHERE session_id = ?", (session_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row["summary_fail_count"] if row and row["summary_fail_count"] is not None else 0
+def get_summary(session_id: str, npc: str) -> str:
+    """이 NPC와의 대화 요약 (없으면 빈 문자열)."""
+    return _get_npc_memory_field(session_id, npc, "summary", "")
 
 
-def increment_fail_count(session_id: str):
+def set_summary(session_id: str, npc: str, summary: str):
+    """이 NPC와의 대화 요약 갱신."""
+    _set_npc_memory_field(session_id, npc, "summary", summary)
+
+
+def get_last_summary_at(session_id: str, npc: str) -> int:
+    """마지막으로 요약이 성공한 시점의 '이 NPC와의 총 메시지 수'. 없으면 0."""
+    return _get_npc_memory_field(session_id, npc, "last_summary_at", 0)
+
+
+def set_last_summary_at(session_id: str, npc: str, count: int):
+    """요약이 끝났을 때, 그 시점의 '이 NPC와의 총 메시지 수'를 기록."""
+    _set_npc_memory_field(session_id, npc, "last_summary_at", count)
+
+
+def get_fail_count(session_id: str, npc: str) -> int:
+    """이 NPC 요약의 연속 실패 횟수."""
+    return _get_npc_memory_field(session_id, npc, "summary_fail_count", 0)
+
+
+def increment_fail_count(session_id: str, npc: str):
     """요약 실패 시 카운터 +1."""
-    _ensure_session(session_id)
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE sessions SET summary_fail_count = summary_fail_count + 1 WHERE session_id = ?",
-        (session_id,),
-    )
-    conn.commit()
-    conn.close()
+    _set_npc_memory_field(session_id, npc, "summary_fail_count", get_fail_count(session_id, npc) + 1)
 
 
-def reset_fail_count(session_id: str):
+def reset_fail_count(session_id: str, npc: str):
     """요약 성공 시 카운터 0으로."""
-    _ensure_session(session_id)
-    conn = _connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE sessions SET summary_fail_count = 0 WHERE session_id = ?",
-        (session_id,),
-    )
-    conn.commit()
-    conn.close()
+    _set_npc_memory_field(session_id, npc, "summary_fail_count", 0)
 
 
 # ── 엔딩 수집함 ──────────────────────────────

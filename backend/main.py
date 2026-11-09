@@ -2,7 +2,18 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
-from config import LM_STUDIO_BASE_URL, LM_STUDIO_MODEL
+from config import (
+    LM_STUDIO_BASE_URL,
+    LM_STUDIO_MODEL,
+    RECENT_MESSAGES,
+    GEN_TEMPERATURE,
+    GEN_TOP_P,
+    GEN_TOP_K,
+    GEN_PRESENCE_PENALTY,
+    GEN_REPEAT_PENALTY,
+    ANALYSIS_TEMPERATURE,
+    ANALYSIS_MAX_TOKENS,
+)
 from models.schemas import (
     ChatRequest,
     ChatResponse,
@@ -13,8 +24,9 @@ from models.schemas import (
     AffinityRecord,
     SessionAffinityResponse,
 )
-from npc.prompts import NPC_SYSTEMS, HARD_RULES
-from npc.npc_list import VALID_NPCS
+from npc.prompts import build_system_prompt, AFFINITY_HIGH
+from npc.npc_list import NPC_LIST, VALID_NPCS
+from npc.postprocess import clean_reply, has_foreign_script, drop_foreign_sentences
 from rag.retriever import retrieve_context
 from memory import store
 
@@ -48,7 +60,7 @@ client = OpenAI(
 
 store.init_db()
 
-# 몇 개의 메시지마다 요약/facts를 갱신할지 (테스트 2, 실사용 6)
+# 같은 NPC와 메시지가 몇 개 쌓일 때마다 그 NPC와의 요약/facts를 갱신할지 (테스트 2, 실사용 6)
 SUMMARY_EVERY = 6
 
 # 요약이 연속 이만큼 실패하면 그 구간은 포기하고 넘어감 (무한 재시도 방지)
@@ -58,18 +70,21 @@ MAX_SUMMARY_FAILS = 3
 AFFINITY_EVERY = 4
 
 # 이 점수(0~100) 이상이면 "열쇠 위치 공개" 조건 충족 (사이드퀘스트)
-AFFINITY_THRESHOLD = 70
+AFFINITY_THRESHOLD = AFFINITY_HIGH
+
+# 한 번 판단할 때 호감도가 움직일 수 있는 최대 폭
+AFFINITY_MAX_STEP = 15
 
 # ── 세션별 락 ──
 # 같은 세션에서 요약/호감도 판단이 동시에 두 번 도는 것을 막는다.
 # 백그라운드로 던지면 이론상 겹칠 수 있으므로,
-# (세션, 작업종류) 조합마다 락을 하나씩 두고 "이미 처리 중이면 스킵"한다.
+# (세션, NPC, 작업종류) 조합마다 락을 하나씩 두고 "이미 처리 중이면 스킵"한다.
 _session_locks = {}
 _locks_guard = threading.Lock()  # _session_locks 딕셔너리 자체를 보호
 
 
 def _get_session_lock(key: str) -> threading.Lock:
-    """키별 락 객체를 가져온다 (없으면 생성). 세션 요약은 session_id, 호감도는 'session_id:npc:affinity' 형태로 사용."""
+    """키별 락 객체를 가져온다 (없으면 생성). 'session_id:npc:memory', 'session_id:npc:affinity' 형태로 사용."""
     with _locks_guard:
         if key not in _session_locks:
             _session_locks[key] = threading.Lock()
@@ -80,6 +95,8 @@ def _get_session_lock(key: str) -> threading.Lock:
 def health():
     return {"status": "ok"}
 
+
+# ── LLM 호출 헬퍼 ──────────────────────────────
 
 def _extract_json(text: str):
     """지저분한 LLM 출력에서 JSON만 안전하게 추출. 실패 시 None."""
@@ -95,114 +112,174 @@ def _extract_json(text: str):
         return None
 
 
-def _maybe_update_memory(session_id: str):
-    """
-    마지막 요약 이후 SUMMARY_EVERY개 이상 쌓이면 요약 + facts 추출/저장.
-    백그라운드에서 실행되며, 세션 락으로 중복 실행을 방지한다.
-    """
-    lock = _get_session_lock(session_id)
+# LM Studio의 구조화 출력(json_schema)이 안 되는 버전이면 한 번 실패한 뒤로는 시도하지 않는다
+_json_schema_supported = True
 
-    # 이미 이 세션의 요약이 돌고 있으면 스킵 (non-blocking)
+
+def _llm_json(system_prompt: str, user_text: str, schema_name: str, schema: dict):
+    """
+    분석용 LLM 호출. JSON 객체를 돌려준다 (실패 시 None).
+    가능하면 LM Studio 구조화 출력으로 JSON 형식을 강제하고, 안 되면 일반 호출 후 파싱한다.
+    """
+    global _json_schema_supported
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
+    params = dict(
+        model=LM_STUDIO_MODEL,
+        messages=messages,
+        temperature=ANALYSIS_TEMPERATURE,
+        max_tokens=ANALYSIS_MAX_TOKENS,
+    )
+
+    if _json_schema_supported:
+        try:
+            resp = client.chat.completions.create(
+                **params,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {"name": schema_name, "strict": True, "schema": schema},
+                },
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            print(f">>> [LLM-JSON] {schema_name} raw: {raw[:200]}", flush=True)
+            return _extract_json(raw)
+        except Exception as e:
+            print(f">>> [LLM-JSON] 구조화 출력 실패 → 일반 호출로 전환 ({type(e).__name__}: {e})", flush=True)
+            _json_schema_supported = False
+
+    resp = client.chat.completions.create(**params)
+    raw = (resp.choices[0].message.content or "").strip()
+    print(f">>> [LLM-JSON] {schema_name} raw: {raw[:200]}", flush=True)
+    return _extract_json(raw)
+
+
+def _format_convo(history, npc_id: str) -> str:
+    """분석용 대화 텍스트. [user]/[assistant] 대신 실제 이름으로 표시한다."""
+    npc_name = NPC_LIST[npc_id]["name"]
+    return "\n".join(
+        f"[{'유저' if m['role'] == 'user' else npc_name}] {m['content']}" for m in history
+    )
+
+
+# ── 백그라운드: NPC별 요약 + facts ──────────────────────────────
+
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "facts": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary", "facts"],
+}
+
+
+def _maybe_update_memory(session_id: str, npc_id: str):
+    """
+    이 NPC와 마지막 요약 이후 SUMMARY_EVERY개 이상 쌓이면, 이 NPC와의 대화만으로 요약 + facts를 갱신한다.
+    (다른 NPC와의 대화 내용이 섞이지 않게 NPC별로 따로 저장한다)
+    백그라운드에서 실행되며, 락으로 중복 실행을 방지한다.
+    """
+    lock = _get_session_lock(f"{session_id}:{npc_id}:memory")
+
+    # 이미 이 세션-NPC의 요약이 돌고 있으면 스킵 (non-blocking)
     if not lock.acquire(blocking=False):
-        print(f">>> [MEMORY] 세션 {session_id} 이미 요약 중 — 스킵", flush=True)
+        print(f">>> [MEMORY] {session_id}/{npc_id} 이미 요약 중 — 스킵", flush=True)
         return
 
     try:
-        total = store.count_messages(session_id)
-        last = store.get_last_summary_at(session_id)
+        total = store.count_messages_by_npc(session_id, npc_id)
+        last = store.get_last_summary_at(session_id, npc_id)
         new_messages = total - last
-        print(f">>> [MEMORY] 함수 진입 | session={session_id} | total={total} | 마지막 요약 이후 {new_messages}개", flush=True)
+        print(f">>> [MEMORY] {session_id}/{npc_id} | total={total} | 마지막 요약 이후 {new_messages}개", flush=True)
 
         if new_messages < SUMMARY_EVERY:
-            print(f">>> [MEMORY] 아직 {new_messages}개 (기준 {SUMMARY_EVERY}개) — 대기", flush=True)
             return
         if MOCK_MODE:
             print(">>> [MEMORY] MOCK_MODE라 스킵", flush=True)
             return
 
-        print(">>> [MEMORY] 트리거됨! LLM에게 요약 요청 중...", flush=True)
-
-        history = store.get_recent_messages(session_id, limit=SUMMARY_EVERY * 2)
-        convo_text = "\n".join(f"[{m['role']}] {m['content']}" for m in history)
+        npc_name = NPC_LIST[npc_id]["name"]
+        prev_summary = store.get_summary(session_id, npc_id)
+        history = store.get_recent_messages(session_id, npc=npc_id, limit=SUMMARY_EVERY * 2)
+        convo_text = _format_convo(history, npc_id)
 
         system_prompt = (
-            "너는 추리 게임의 대화 분석기다. 아래 유저와 NPC의 대화를 분석해서 "
-            "반드시 아래 JSON 형식으로만 답하라. 다른 말은 절대 붙이지 마라.\n\n"
+            f"너는 추리 게임의 대화 분석기다. 아래는 유저와 NPC '{npc_name}'의 대화다.\n"
+            f"[기존 요약]\n{prev_summary or '없음'}\n\n"
+            "기존 요약에 새 대화 내용을 반영해서 갱신하라. 반드시 아래 JSON 형식으로만 답하라. 다른 말은 절대 붙이지 마라.\n\n"
             "{\n"
-            '  "summary": "유저가 무엇을 원하고 어떤 행동 패턴을 보이는지 3문장 이내 요약",\n'
-            '  "facts": ["유저가 이 대화를 통해 알게 되었거나 드러난 정보들. 게임 단서뿐 아니라 유저의 의도·관심사·상황도 포함. 각 항목은 짧은 한 문장."]\n'
+            f'  "summary": "유저가 {npc_name}에게 무엇을 묻고 원했는지, 어떤 태도를 보였는지 3문장 이내 요약",\n'
+            f'  "facts": ["이 대화에서 {npc_name}이(가) 유저에게 실제로 말해 준 정보, 또는 유저가 {npc_name}에게 밝힌 사실. '
+            '대화에 실제로 나온 내용만 쓴다. 각 항목은 짧은 한 문장."]\n'
             "}\n\n"
-            "facts 예시: [\"유저는 이스터 경이라는 인물의 존재를 알게 됨\", "
+            "facts 예시: [\"유저는 이스터 경이라는 인물에 대해 물었음\", "
             "\"유저는 저택에서 나가는 방법을 계속 찾고 있음\", "
-            "\"유저는 엘라를 의심하기 시작함\"]\n"
+            "\"유저는 엘라를 의심하는 말을 했음\"]\n"
             "/no_think"
         )
 
         try:
-            resp = client.chat.completions.create(
-                model=LM_STUDIO_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": convo_text},
-                ],
-            )
-            raw = (resp.choices[0].message.content or "").strip()
-            data = _extract_json(raw)
-            print(f">>> [MEMORY] raw 응답: {raw[:200]}", flush=True)
+            data = _llm_json(system_prompt, convo_text, "npc_memory", SUMMARY_SCHEMA)
             print(f">>> [MEMORY] 파싱 결과: {data}", flush=True)
 
             if data:
                 summary = str(data.get("summary", "")).strip()
                 if summary:
-                    store.set_summary(session_id, summary)
-                    print(">>> [MEMORY] 요약 저장 완료", flush=True)
+                    store.set_summary(session_id, npc_id, summary)
 
                 facts = data.get("facts", [])
+                saved = 0
                 if isinstance(facts, list):
-                    saved = 0
                     for f in facts:
                         f = str(f).strip()
                         if f:
-                            store.add_fact(session_id, f)
+                            store.add_fact(session_id, npc_id, f)
                             saved += 1
-                    print(f">>> [MEMORY] facts {saved}개 저장 완료", flush=True)
+                print(f">>> [MEMORY] {npc_id} 요약 저장, facts {saved}개 저장", flush=True)
 
                 # 성공: 카운터 갱신 + 실패 횟수 리셋
-                store.set_last_summary_at(session_id, total)
-                store.reset_fail_count(session_id)
-                print(f">>> [MEMORY] last_summary_at = {total} 갱신", flush=True)
+                store.set_last_summary_at(session_id, npc_id, total)
+                store.reset_fail_count(session_id, npc_id)
             else:
-                # 파싱 실패 → 실패 카운트 증가, 한계 넘으면 포기하고 넘어감
-                store.increment_fail_count(session_id)
-                fails = store.get_fail_count(session_id)
-                print(f">>> [MEMORY] JSON 파싱 실패 ({fails}/{MAX_SUMMARY_FAILS})", flush=True)
-                if fails >= MAX_SUMMARY_FAILS:
-                    store.set_last_summary_at(session_id, total)
-                    store.reset_fail_count(session_id)
-                    print(">>> [MEMORY] 연속 실패 한계 도달 — 이번 구간 포기하고 다음으로 넘어감", flush=True)
+                _record_summary_failure(session_id, npc_id, total, "JSON 파싱 실패")
 
         except Exception as e:
             # LLM 호출 자체 실패도 동일하게 카운트 (무한 재시도 방지)
-            store.increment_fail_count(session_id)
-            fails = store.get_fail_count(session_id)
-            print(f">>> [MEMORY ERROR] {type(e).__name__}: {e} ({fails}/{MAX_SUMMARY_FAILS})", flush=True)
-            if fails >= MAX_SUMMARY_FAILS:
-                store.set_last_summary_at(session_id, total)
-                store.reset_fail_count(session_id)
-                print(">>> [MEMORY] 연속 실패 한계 도달 — 이번 구간 포기하고 다음으로 넘어감", flush=True)
+            _record_summary_failure(session_id, npc_id, total, f"{type(e).__name__}: {e}")
 
     finally:
         lock.release()
 
 
+def _record_summary_failure(session_id: str, npc_id: str, total: int, reason: str):
+    """요약 실패를 기록하고, 연속 실패 한계를 넘으면 그 구간은 포기하고 넘어간다."""
+    store.increment_fail_count(session_id, npc_id)
+    fails = store.get_fail_count(session_id, npc_id)
+    print(f">>> [MEMORY] {npc_id} 요약 실패: {reason} ({fails}/{MAX_SUMMARY_FAILS})", flush=True)
+    if fails >= MAX_SUMMARY_FAILS:
+        store.set_last_summary_at(session_id, npc_id, total)
+        store.reset_fail_count(session_id, npc_id)
+        print(">>> [MEMORY] 연속 실패 한계 도달 — 이번 구간 포기하고 다음으로 넘어감", flush=True)
+
+
+# ── 백그라운드: 호감도 ──────────────────────────────
+
+AFFINITY_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "integer"}},
+    "required": ["score"],
+}
+
+
 def _maybe_update_affinity(session_id: str, npc_id: str):
     """
-    이 NPC와 AFFINITY_EVERY턴 이상 새로 대화했으면, 최근 대화 내용을 바탕으로
+    이 NPC와 AFFINITY_EVERY개 이상 새로 대화했으면, 최근 대화 내용을 바탕으로
     LLM에게 호감도 점수(0~100)를 다시 판단시켜 저장한다.
     백그라운드에서 실행되며, (세션, NPC) 조합 락으로 중복 실행을 방지한다.
     """
-    lock_key = f"{session_id}:{npc_id}:affinity"
-    lock = _get_session_lock(lock_key)
+    lock = _get_session_lock(f"{session_id}:{npc_id}:affinity")
 
     if not lock.acquire(blocking=False):
         print(f">>> [AFFINITY] {session_id}/{npc_id} 이미 판단 중 — 스킵", flush=True)
@@ -218,13 +295,15 @@ def _maybe_update_affinity(session_id: str, npc_id: str):
         if MOCK_MODE:
             return
 
+        npc = NPC_LIST[npc_id]
         current_score = store.get_affinity(session_id, npc_id)
         history = store.get_recent_messages(session_id, npc=npc_id, limit=AFFINITY_EVERY * 2)
-        convo_text = "\n".join(f"[{m['role']}] {m['content']}" for m in history)
+        convo_text = _format_convo(history, npc_id)
 
         system_prompt = (
-            "너는 추리 게임 속 NPC와 유저 사이의 호감도를 평가하는 분석기다. "
-            f"NPC '{npc_id}'에 대한 유저의 현재 호감도 점수는 {current_score}점(0~100 범위)이다. "
+            "너는 추리 게임 속 NPC와 유저 사이의 호감도를 평가하는 분석기다.\n"
+            f"NPC: {npc['name']} — {npc['description']}\n"
+            f"이 NPC에 대한 유저의 현재 호감도 점수는 {current_score}점(0~100 범위)이다.\n"
             "호감도는 '예의 바른 말투'가 아니라 '얼마나 진정성 있게 이 NPC 개인에게 관심을 가졌는가'로 "
             "평가해야 한다. 형식적으로 존댓말만 쓰거나 인사치레만 하는 대화는 점수를 올리면 안 된다.\n\n"
             "아래 기준으로 판단하라:\n"
@@ -233,7 +312,7 @@ def _maybe_update_affinity(session_id: str, npc_id: str):
             "- 점수를 올리면 안 되는 경우: 단순히 공손한 말투만 쓰는 경우, 단서/정보 캐내기에만 집중하고 "
             "NPC 개인에는 관심이 없는 경우, 의례적인 인사나 추임새만 반복하는 경우\n"
             "- 점수를 내려야 하는 경우: 무례하거나 공격적인 경우, NPC를 추궁·의심하는 투로 몰아붙이는 경우\n\n"
-            "변화는 점진적이어야 한다 (한 번 판단에 현재 점수에서 ±15점 이내로만 움직여라). "
+            f"변화는 점진적이어야 한다 (현재 점수에서 ±{AFFINITY_MAX_STEP}점 이내). "
             "반드시 아래 JSON 형식으로만 답하라. 다른 말은 절대 붙이지 마라.\n\n"
             "{\n"
             '  "score": 0부터 100 사이의 정수\n'
@@ -241,19 +320,12 @@ def _maybe_update_affinity(session_id: str, npc_id: str):
         )
 
         try:
-            resp = client.chat.completions.create(
-                model=LM_STUDIO_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": convo_text},
-                ],
-            )
-            raw = (resp.choices[0].message.content or "").strip()
-            data = _extract_json(raw)
-            print(f">>> [AFFINITY] {npc_id} raw 응답: {raw[:200]}", flush=True)
+            data = _llm_json(system_prompt, convo_text, "affinity", AFFINITY_SCHEMA)
 
             if data and "score" in data:
                 new_score = int(data["score"])
+                # 모델이 규칙을 어겨도 한 번에 크게 움직이지 않도록 코드에서 한 번 더 제한
+                new_score = max(current_score - AFFINITY_MAX_STEP, min(current_score + AFFINITY_MAX_STEP, new_score))
                 store.set_affinity(session_id, npc_id, new_score)
                 print(f">>> [AFFINITY] {npc_id} 호감도 {current_score} → {new_score}", flush=True)
             else:
@@ -270,79 +342,119 @@ def _maybe_update_affinity(session_id: str, npc_id: str):
         lock.release()
 
 
+# ── 대화 ──────────────────────────────
+
+def _build_rag_query(recent, user_message: str) -> str:
+    """
+    RAG 검색어. 최신 발화만 쓰면 "그래서요?" 같은 짧은 말에 엉뚱한 내용이 검색되므로
+    직전 유저 발화와 직전 NPC 답변을 앞에 붙인다. (최신 발화를 마지막에 둔다)
+    """
+    prev_user = ""
+    prev_npc = ""
+    # recent의 마지막은 방금 저장한 유저 발화이므로 그 앞에서 찾는다
+    for m in reversed(recent[:-1]):
+        if m["role"] == "assistant" and not prev_npc:
+            prev_npc = m["content"]
+        elif m["role"] == "user" and not prev_user:
+            prev_user = m["content"]
+        if prev_user and prev_npc:
+            break
+    parts = [p[:200] for p in (prev_user, prev_npc) if p]
+    parts.append(user_message)
+    return "\n".join(parts)
+
+
+def _call_npc_llm(npc_id: str, system_prompt: str, convo_messages: list, temperature: float):
+    resp = client.chat.completions.create(
+        model=LM_STUDIO_MODEL,
+        messages=[{"role": "system", "content": system_prompt}, *convo_messages],
+        temperature=temperature,
+        top_p=GEN_TOP_P,
+        presence_penalty=GEN_PRESENCE_PENALTY,
+        max_tokens=NPC_LIST[npc_id]["max_tokens"],
+        # OpenAI 표준에 없는 LM Studio 전용 파라미터
+        extra_body={"top_k": GEN_TOP_K, "repeat_penalty": GEN_REPEAT_PENALTY},
+    )
+    choice = resp.choices[0]
+    return choice.message.content or "", choice.finish_reason == "length"
+
+
+def _generate_reply(npc_id: str, system_prompt: str, convo_messages: list) -> str:
+    """
+    NPC 답변 생성 + 후처리.
+    다른 언어(한자/일본어/영어 등)가 섞이거나 빈 답변이면 한 번 다시 생성하고,
+    그래도 섞여 있으면 섞인 문장만 뺀다.
+    """
+    npc = NPC_LIST[npc_id]
+    names = [npc["name"], npc["name"].split()[0], npc_id]
+
+    raw, truncated = _call_npc_llm(npc_id, system_prompt, convo_messages, GEN_TEMPERATURE)
+    reply = clean_reply(raw, names, npc["max_sentences"], truncated)
+
+    if not reply or has_foreign_script(reply):
+        print(f">>> [REPLY] {npc_id} 재생성 (원문: {raw[:120]!r})", flush=True)
+        retry_prompt = system_prompt.replace(
+            "\n/no_think",
+            "\n- 한자, 일본어, 영어를 한 글자도 쓰지 않는다. 이모지도 쓰지 않는다. 순수한 한국어로만 말한다.\n/no_think",
+        )
+        raw2, truncated2 = _call_npc_llm(npc_id, retry_prompt, convo_messages, max(0.3, GEN_TEMPERATURE - 0.3))
+        reply2 = clean_reply(raw2, names, npc["max_sentences"], truncated2)
+        if reply2 and not has_foreign_script(reply2):
+            reply = reply2
+        else:
+            reply = drop_foreign_sentences(reply2 or reply)
+
+    return reply or "…"
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, background_tasks: BackgroundTasks):
     # 1. Validate NPC
     if req.npc not in VALID_NPCS:
         raise HTTPException(status_code=400, detail=f"Unknown NPC: {req.npc}")
 
-    # 2. 최신 유저 메시지
+    # 2. 최신 유저 메시지 저장
     user_message = req.messages[-1].content
-
-    # 2-1. 유저 발화 저장
     store.add_message(req.session_id, req.npc, "user", user_message)
 
-    # 3. RAG 검색
-    context = retrieve_context(user_message, req.npc)
+    # 3. 이 NPC와의 기억 로드 (다른 NPC와의 대화는 섞지 않는다)
+    recent = store.get_recent_messages(req.session_id, npc=req.npc, limit=RECENT_MESSAGES)
+    summary = store.get_summary(req.session_id, req.npc)
+    facts = store.get_facts(req.session_id, req.npc)
+    affinity_score = store.get_affinity(req.session_id, req.npc)
 
-    # 3-1. 메모리 로드
-    summary = store.get_summary(req.session_id)
-    facts = store.get_facts(req.session_id)
-    recent = store.get_recent_messages(req.session_id, npc=req.npc, limit=6)
+    # 4. RAG 검색 (최근 대화 흐름까지 반영한 검색어)
+    context = retrieve_context(_build_rag_query(recent, user_message), req.npc)
 
-    # 4. 시스템 프롬프트 구성
-    system_prompt = NPC_SYSTEMS[req.npc]
+    # 5. 시스템 프롬프트 구성
+    system_prompt = build_system_prompt(
+        req.npc,
+        context=context,
+        summary=summary,
+        facts=facts,
+        affinity_score=affinity_score,
+    )
 
-    if context:
-        system_prompt += f"""
-
-[관련 배경 정보 — 절대 직접 언급하지 말 것. 행동 지침에만 활용할 것]
-{context}
-"""
-
-    if summary:
-        system_prompt += f"""
-
-[지금까지의 대화 맥락 — 이 유저에 대해 파악한 것]
-{summary}
-"""
-
-    if facts:
-        facts_text = "\n".join(f"- {f}" for f in facts)
-        system_prompt += f"""
-
-[유저가 이미 알아낸 것들 — 유저가 이걸 다시 물으면 '이미 아시잖아요' 식으로 반응 가능]
-{facts_text}
-"""
-
-    system_prompt += HARD_RULES + "\n/no_think"
-
-    # 5. LM Studio 호출
+    # 6. LM Studio 호출
     if MOCK_MODE:
-        reply = f"[MOCK] {req.npc} | RAG:{'있음' if context else '없음'} | 요약:{'있음' if summary else '없음'} | facts:{len(facts)}개"
+        reply = (
+            f"[MOCK] {req.npc} | RAG:{'있음' if context else '없음'} | 요약:{'있음' if summary else '없음'} "
+            f"| facts:{len(facts)}개 | 호감도:{affinity_score} | 프롬프트:{len(system_prompt)}자"
+        )
     else:
         convo_messages = [{"role": m["role"], "content": m["content"]} for m in recent]
-        response = client.chat.completions.create(
-            model=LM_STUDIO_MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                *convo_messages,
-            ]
-        )
-        reply = response.choices[0].message.content
-        if not reply:
-            reply = "..."
-        reply = reply.strip()
+        try:
+            reply = _generate_reply(req.npc, system_prompt, convo_messages)
+        except Exception as e:
+            print(f">>> [CHAT ERROR] {type(e).__name__}: {e}", flush=True)
+            raise HTTPException(status_code=503, detail="LLM 서버 응답 실패")
 
-    # 5-1. NPC 응답 저장
+    # 6-1. NPC 응답 저장
     store.add_message(req.session_id, req.npc, "assistant", reply)
 
-    # 5-2. 요약 + facts 갱신을 백그라운드로 던짐
-    #      → 유저는 응답을 즉시 받고, 요약은 뒤에서 처리됨
-    #      → 응답(task1)과 요약(task2)의 분리 + 응답 지연 제거
-    background_tasks.add_task(_maybe_update_memory, req.session_id)
-
-    # 5-3. 호감도 갱신도 백그라운드로 던짐 (이 NPC와의 대화 기준)
+    # 7. 요약 + facts 갱신, 호감도 갱신을 백그라운드로 던짐 (이 NPC와의 대화 기준)
+    #    → 유저는 응답을 즉시 받고, 분석은 뒤에서 처리됨
+    background_tasks.add_task(_maybe_update_memory, req.session_id, req.npc)
     background_tasks.add_task(_maybe_update_affinity, req.session_id, req.npc)
 
     return ChatResponse(reply=reply, npc=req.npc)
