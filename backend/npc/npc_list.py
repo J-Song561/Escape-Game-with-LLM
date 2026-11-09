@@ -26,9 +26,9 @@ NPC_LIST = {
     "hailey": {
         "name": "헤일리",
         "description": "엘라 부인의 딸. 해맑고 수다스럽지만 아는 것이 없다.",
-        "min_sentences": 3,
-        "max_sentences": 5,
-        "max_tokens": 360,
+        "min_sentences": 2,
+        "max_sentences": 4,  # 5문장이면 할 말이 없을 때 지어내는 경향이 있어 4로 줄임
+        "max_tokens": 300,
     },
 }
 

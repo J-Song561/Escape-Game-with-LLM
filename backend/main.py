@@ -24,9 +24,16 @@ from models.schemas import (
     AffinityRecord,
     SessionAffinityResponse,
 )
-from npc.prompts import build_system_prompt, AFFINITY_HIGH
+from npc.prompts import (
+    build_system_prompt, example_lines, AFFINITY_HIGH,
+    SECRET_PATTERNS, SECRET_RETRY_RULE, DEFLECT_LINES,
+)
 from npc.npc_list import NPC_LIST, VALID_NPCS
-from npc.postprocess import clean_reply, has_foreign_script, drop_foreign_sentences
+from npc.postprocess import (
+    clean_reply, has_foreign_script, drop_foreign_sentences, repeated_sentences, drop_sentences,
+    secret_sentences, has_meta_word, fix_meta_words, strip_leading_connective,
+    copied_example_sentences,
+)
 from rag.retriever import retrieve_context
 from memory import store
 
@@ -74,6 +81,8 @@ AFFINITY_THRESHOLD = AFFINITY_HIGH
 
 # 한 번 판단할 때 호감도가 움직일 수 있는 최대 폭
 AFFINITY_MAX_STEP = 15
+# 반복 검사에 쓰는 직전 NPC 답변 개수
+REPEAT_LOOKBACK = 3
 
 # ── 세션별 락 ──
 # 같은 세션에서 요약/호감도 판단이 동시에 두 번 도는 것을 막는다.
@@ -382,29 +391,78 @@ def _call_npc_llm(npc_id: str, system_prompt: str, convo_messages: list, tempera
 def _generate_reply(npc_id: str, system_prompt: str, convo_messages: list) -> str:
     """
     NPC 답변 생성 + 후처리.
-    다른 언어(한자/일본어/영어 등)가 섞이거나 빈 답변이면 한 번 다시 생성하고,
-    그래도 섞여 있으면 섞인 문장만 뺀다.
+    아래 문제가 있으면 한 번 다시 생성한다.
+      - 빈 답변
+      - 다른 언어(한자/일본어/영어 등)가 섞임
+      - 직전 답변(최근 REPEAT_LOOKBACK개)이나 프롬프트 예시 대사와 거의 같은 문장을 씀
+      - 숨겨야 할 비밀을 털어놓음 (SECRET_PATTERNS)
+    다시 만든 답변에도 문제가 남으면 문제 있는 문장만 빼고,
+    비밀을 말한 문장은 캐릭터다운 회피 대사(DEFLECT_LINES)로 바꾼다. 비밀은 어떤 경우에도 내보내지 않는다.
     """
     npc = NPC_LIST[npc_id]
     names = [npc["name"], npc["name"].split()[0], npc_id]
+    # 반복 검사: 직전 답변과 비슷한 문장(유사도 0.6), 프롬프트 예시를 거의 그대로 베낀 문장(0.85)
+    recent_replies = [m["content"] for m in convo_messages if m["role"] == "assistant"][-REPEAT_LOOKBACK:]
+    examples = example_lines(npc_id)
+    secret_patterns = SECRET_PATTERNS.get(npc_id, [])
 
-    raw, truncated = _call_npc_llm(npc_id, system_prompt, convo_messages, GEN_TEMPERATURE)
-    reply = clean_reply(raw, names, npc["max_sentences"], truncated)
+    def find_repeats(text: str) -> list:
+        found = repeated_sentences(text, recent_replies)
+        return found + [s for s in copied_example_sentences(text, examples) if s not in found]
 
-    if not reply or has_foreign_script(reply):
-        print(f">>> [REPLY] {npc_id} 재생성 (원문: {raw[:120]!r})", flush=True)
-        retry_prompt = system_prompt.replace(
-            "\n/no_think",
-            "\n- 한자, 일본어, 영어를 한 글자도 쓰지 않는다. 이모지도 쓰지 않는다. 순수한 한국어로만 말한다.\n/no_think",
-        )
-        raw2, truncated2 = _call_npc_llm(npc_id, retry_prompt, convo_messages, max(0.3, GEN_TEMPERATURE - 0.3))
-        reply2 = clean_reply(raw2, names, npc["max_sentences"], truncated2)
-        if reply2 and not has_foreign_script(reply2):
-            reply = reply2
-        else:
-            reply = drop_foreign_sentences(reply2 or reply)
+    def generate(prompt: str, temperature: float) -> str:
+        raw, truncated = _call_npc_llm(npc_id, prompt, convo_messages, temperature)
+        text = clean_reply(raw, names, npc["max_sentences"], truncated)
+        # "…"만 있는 답변은 유저가 받을 정보가 없으므로 빈 답변으로 보고 다시 만든다
+        return text if re.sub(r"[\s….!?~]", "", text) else ""
 
-    return reply or "…"
+    def problems(text: str) -> dict:
+        return {
+            "empty": not text,
+            "foreign": has_foreign_script(text),
+            "repeats": find_repeats(text),
+            "secrets": secret_sentences(text, secret_patterns),
+            "meta": has_meta_word(text),
+        }
+
+    reply = generate(system_prompt, GEN_TEMPERATURE)
+    prob = problems(reply)
+    if not any(prob.values()):
+        return reply
+
+    print(f">>> [REPLY] {npc_id} 재생성 {prob} 원문: {reply[:120]!r}", flush=True)
+    extra = []
+    temperature = GEN_TEMPERATURE
+    if prob["secrets"]:
+        extra.append(SECRET_RETRY_RULE)
+    if prob["meta"]:
+        extra.append('- 상대를 "유저", "플레이어"라고 부르지 않는다. "당신"이나 "손님"이라고 부른다.')
+    if prob["foreign"] or prob["empty"]:
+        extra.append("- 한자, 일본어, 영어를 한 글자도 쓰지 않는다. 이모지도 쓰지 않는다. 순수한 한국어로만 말한다.")
+        temperature = max(0.3, GEN_TEMPERATURE - 0.3)
+    if prob["repeats"]:
+        quoted = ", ".join(f'"{s}"' for s in prob["repeats"][:3])
+        extra.append(f"- 다음 말은 이미 했으므로 쓰지 않는다: {quoted}. 다른 내용과 다른 문장 구조로 답한다.")
+        if not prob["foreign"]:
+            temperature = min(1.0, GEN_TEMPERATURE + 0.2)
+    retry_prompt = system_prompt.replace("\n/no_think", "\n" + "\n".join(extra) + "\n/no_think")
+
+    reply2 = generate(retry_prompt, temperature)
+    if reply2 and not any(problems(reply2).values()):
+        return reply2
+
+    # 두 번 다 문제가 있으면 문제 문장을 정리한다
+    # 깨진 글자(�)는 "…" 바로 뒤에 붙어 나오는 경우가 많아서, 문장째 버리지 않고 글자만 지운다
+    best = drop_foreign_sentences(fix_meta_words((reply2 or reply).replace("�", "")))
+    # 마지막 단계에서는 '직전 답변 반복'만 뺀다. 예시 대사를 베낀 정도는 앞뒤가 안 맞는 답보다 낫다.
+    leftover = drop_sentences(best, repeated_sentences(best, recent_replies))
+    best = strip_leading_connective(leftover) or best
+    secrets = secret_sentences(best, secret_patterns)
+    if secrets:
+        print(f">>> [REPLY] {npc_id} 비밀 문장 차단: {secrets}", flush=True)
+        kept = strip_leading_connective(drop_sentences(best, secrets))
+        best = f"{kept} {DEFLECT_LINES[npc_id]}".strip()
+    return best or DEFLECT_LINES.get(npc_id, "…")
 
 
 @app.post("/chat", response_model=ChatResponse)

@@ -8,24 +8,28 @@ LLM이 만든 NPC 답변을 유저에게 보여주기 전에 다듬는다.
 - max_tokens에 걸려 문장 중간에 끊긴 경우, 마지막 완결 문장까지만 남기기
 - 이모지, 이모티콘(^^, ㅎㅎ, ㅠㅠ)은 조용히 지운다 (재생성할 정도의 문제는 아니라서)
 - 한국어가 아닌 글자(한자, 일본어, 영어, 러시아어 등)가 섞였는지 검사
-  (main.py에서 재생성 여부 판단에 사용)
+- 직전 답변과 거의 같은 문장을 되풀이했는지 검사
+  (두 검사는 main.py에서 재생성 여부 판단에 사용)
 """
 
+import difflib
 import re
 from typing import List
 
 HANZI_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]")
-# 2글자 이상 영어 단어. (OK, AI 같은 짧은 단어도 잡히지만 NPC 대사에는 필요 없다)
-LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+# 영어 알파벳은 한 글자라도 잡는다. NPC 대사에는 필요 없고,
+# 베트남어("lạ")처럼 알파벳 한 글자 + 특수 문자로 섞여 나오는 경우가 있다.
+LATIN_WORD_RE = re.compile(r"[A-Za-z]")
 # 한자 말고도 Qwen이 가끔 섞는 다른 문자들
 OTHER_SCRIPT_RE = re.compile(
     "["
     "぀-ヿㇰ-ㇿｦ-ﾟ"  # 일본어 히라가나/가타카나
-    "À-ɏ"                            # 악센트 붙은 라틴 문자 (é, ñ, ư 등)
+    "À-ɏḀ-ỿ"               # 악센트 붙은 라틴 문자 (é, ñ, ư, 베트남어 ạ 등)
     "Ａ-Ｚａ-ｚ"               # 전각 영문 (Ａ, ｂ)
     "Ͱ-ϿЀ-ӿ"               # 그리스, 키릴(러시아)
     "֐-׿؀-ۿ"               # 히브리, 아랍
     "ऀ-ॿ฀-๿"               # 데바나가리, 태국
+    "�"                                   # 깨진 글자(�): 모델이 한글을 반쯤 만들다 만 경우
     "]"
 )
 
@@ -77,6 +81,83 @@ def strip_emoji(text: str) -> str:
     text = re.sub(r"[ \t]+([.!?,…~])", r"\1", text)  # "좋아요 !" → "좋아요!"
     text = re.sub(r"[ \t]{2,}", " ", text)
     return "\n".join(line.strip() for line in text.splitlines())
+
+
+_NORM_RE = re.compile(r"[\s.,!?…~\"'“”‘’()\[\]]")
+REPEAT_MIN_CHARS = 6      # 이보다 짧은 문장("그렇군요.")은 반복 검사에서 뺀다
+REPEAT_THRESHOLD = 0.6    # 직전 답변과 글자 유사도가 이 이상이면 같은 문장으로 본다
+# 예시 대사는 같은 상황이면 비슷한 말이 나오는 게 자연스러우므로, 거의 그대로 베낀 경우만 잡는다
+EXAMPLE_COPY_THRESHOLD = 0.85
+
+
+def _norm(sentence: str) -> str:
+    return _NORM_RE.sub("", sentence)
+
+
+def _similar(a: str, b: str, threshold: float = REPEAT_THRESHOLD) -> bool:
+    return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def copied_example_sentences(reply: str, examples: List[str]) -> List[str]:
+    """프롬프트 예시 대사를 거의 그대로 베낀 문장을 찾는다."""
+    ex = [_norm(s) for e in examples for s in split_sentences(e)]
+    ex = [s for s in ex if len(s) >= REPEAT_MIN_CHARS]
+    return [
+        sent for sent in split_sentences(reply)
+        if len(_norm(sent)) >= REPEAT_MIN_CHARS
+        and any(_similar(_norm(sent), e, EXAMPLE_COPY_THRESHOLD) for e in ex)
+    ]
+
+
+def repeated_sentences(reply: str, previous_replies: List[str]) -> List[str]:
+    """
+    직전 답변들과 거의 같은 문장, 또는 이번 답변 안에서 앞 문장을 되풀이한 문장을 찾는다.
+    작은 모델은 "헤일리는 저와 같은 사람입니다" → "루이스씨는 저와 같은 사람입니다"처럼
+    이름만 바꿔 같은 틀을 반복하는 일이 많아서, 완전히 같은지가 아니라 유사도로 본다.
+    """
+    seen = [_norm(s) for r in previous_replies for s in split_sentences(r)]
+    seen = [s for s in seen if len(s) >= REPEAT_MIN_CHARS]
+    found = []
+    for sent in split_sentences(reply):
+        n = _norm(sent)
+        if len(n) < REPEAT_MIN_CHARS:
+            continue
+        if any(_similar(n, s) for s in seen):
+            found.append(sent)
+        seen.append(n)
+    return found
+
+
+_LEADING_CONNECTIVE_RE = re.compile(r"^(하지만|그런데|근데|그래서|그리고|그러니까|그러나|그래도|게다가)(?:,\s*|\s+)")
+
+
+def strip_leading_connective(text: str) -> str:
+    """앞 문장을 뺀 뒤 남은 답변이 '하지만…'처럼 접속어로 시작하면 접속어를 지운다."""
+    return _LEADING_CONNECTIVE_RE.sub("", text.strip())
+
+
+def drop_sentences(text: str, targets: List[str]) -> str:
+    """targets에 든 문장을 뺀다. 다 빠지면 빈 문자열."""
+    return " ".join(s for s in split_sentences(text) if s not in targets)
+
+
+META_WORD_RE = re.compile(r"유저|플레이어|인공지능|챗봇|어시스턴트")
+
+
+def has_meta_word(text: str) -> bool:
+    """캐릭터가 쓰면 몰입이 깨지는 단어("유저분", "플레이어" 등)가 있으면 True."""
+    return bool(META_WORD_RE.search(text))
+
+
+def fix_meta_words(text: str) -> str:
+    """재생성 후에도 남았을 때의 마지막 보정: '유저분/유저님/유저' → '손님'."""
+    return re.sub(r"(유저|플레이어)(분|님)?", "손님", text)
+
+
+def secret_sentences(text: str, patterns: List[str]) -> List[str]:
+    """비밀을 털어놓는 문장(patterns 중 하나에 걸리는 문장)을 찾는다."""
+    regs = [re.compile(p) for p in patterns]
+    return [s for s in split_sentences(text) if any(r.search(s) for r in regs)]
 
 
 def drop_foreign_sentences(text: str) -> str:
