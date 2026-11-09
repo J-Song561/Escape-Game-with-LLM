@@ -19,6 +19,7 @@ NPC마다 고정된 대화 시나리오를 실제 /chat 로직(main.chat)으로 
 
 import argparse
 import asyncio
+import difflib
 import json
 import os
 import re
@@ -107,12 +108,20 @@ try:
 except Exception:
     pass
 
+# 프롬프트 예시 대사 (그대로 베꼈는지 검사용). 예전 코드에는 없으므로 없으면 검사를 건너뛴다.
+EXAMPLES = {}
+try:
+    from npc.prompts import example_lines
+    EXAMPLES = {npc: example_lines(npc) for npc in MAX_SENTENCES}
+except Exception:
+    pass
+
 HANZI_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿]")
-LATIN_WORD_RE = re.compile(r"[A-Za-z]{2,}")
+LATIN_WORD_RE = re.compile(r"[A-Za-z]")
 THINK_RE = re.compile(r"</?think>")
 # 예전 코드(postprocess.py 없음)에서도 돌아가야 하므로 패턴을 여기에도 둔다
 OTHER_SCRIPT_RE = re.compile(
-    "[぀-ヿㇰ-ㇿｦ-ﾟÀ-ɏＡ-Ｚａ-ｚ"
+    "[぀-ヿㇰ-ㇿｦ-ﾟÀ-ɏḀ-ỿＡ-Ｚａ-ｚ"
     "Ͱ-ϿЀ-ӿ֐-׿؀-ۿऀ-ॿ฀-๿]"
 )
 EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿⌀-⏿️‍]")
@@ -126,6 +135,24 @@ def count_sentences(text: str) -> int:
     return len(parts)
 
 
+def _sentences(text: str) -> list:
+    text = text.replace("...", "…")
+    return [p for p in re.split(r"(?:(?<=[.!?])|(?<=[.!?][\"'”’)]))\s+|\n+", text.strip()) if p.strip()]
+
+
+def count_similar_sentences(reply: str, previous: list) -> int:
+    """직전 답변들(같은 NPC)과 글자 유사도 0.6 이상인 문장 수. 이름만 바꾼 틀 반복도 잡는다."""
+    norm = lambda s: re.sub(r"[\s.,!?…~\"'“”‘’()]", "", s)
+    seen = [norm(s) for r in previous for s in _sentences(r)]
+    seen = [s for s in seen if len(s) >= 6]
+    n = 0
+    for sent in _sentences(reply):
+        s = norm(sent)
+        if len(s) >= 6 and any(difflib.SequenceMatcher(None, s, p).ratio() >= 0.6 for p in seen):
+            n += 1
+    return n
+
+
 def check_reply(npc: str, reply: str) -> list:
     """자동으로 잡을 수 있는 문제들."""
     issues = []
@@ -137,6 +164,10 @@ def check_reply(npc: str, reply: str) -> list:
         issues.append("영어")
     if OTHER_SCRIPT_RE.search(reply):
         issues.append("기타외국어")
+    if "�" in reply:
+        issues.append("깨진글자")
+    if re.search(r"유저|플레이어|인공지능|챗봇|어시스턴트", reply):
+        issues.append("메타단어")
     if EMOJI_RE.search(reply) or EMOTICON_RE.search(reply):
         issues.append("이모지")
     n = count_sentences(reply)
@@ -171,9 +202,13 @@ def run_scenario(name: str, turns: list, run_bg: bool) -> dict:
         latency = time.time() - t0
 
         issues = check_reply(npc, reply) if not error else ["오류"]
-        if prev_by_npc.get(npc) and prev_by_npc[npc] == reply:
-            issues.append("직전답변반복")
-        prev_by_npc[npc] = reply
+        n_rep = count_similar_sentences(reply, prev_by_npc.get(npc, [])[-3:])
+        if n_rep:
+            issues.append(f"유사반복({n_rep}문장)")
+        n_copy = count_similar_sentences(reply, EXAMPLES.get(npc, []))
+        if n_copy:
+            issues.append(f"예시복사({n_copy}문장)")
+        prev_by_npc.setdefault(npc, []).append(reply)
 
         print(f"[{name} {i}/{len(turns)}] {npc} ({latency:.1f}s) {'⚠ ' + ','.join(issues) if issues else ''}")
         print(f"  나: {text}")
