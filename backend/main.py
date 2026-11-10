@@ -25,7 +25,7 @@ from models.schemas import (
     SessionAffinityResponse,
 )
 from npc.prompts import (
-    build_system_prompt, example_lines, AFFINITY_HIGH,
+    build_system_prompt, example_lines, npc_address, AFFINITY_HIGH,
     SECRET_PATTERNS, SECRET_RETRY_RULE, DEFLECT_LINES,
 )
 from npc.npc_list import NPC_LIST, VALID_NPCS
@@ -436,7 +436,7 @@ def _generate_reply(npc_id: str, system_prompt: str, convo_messages: list) -> st
     if prob["secrets"]:
         extra.append(SECRET_RETRY_RULE)
     if prob["meta"]:
-        extra.append('- 상대를 "유저", "플레이어"라고 부르지 않는다. "당신"이나 "손님"이라고 부른다.')
+        extra.append(f'- 상대를 "유저", "플레이어"라고 부르지 않는다. "{npc_address(npc_id)}"라고 부른다.')
     if prob["foreign"] or prob["empty"]:
         extra.append("- 한자, 일본어, 영어를 한 글자도 쓰지 않는다. 이모지도 쓰지 않는다. 순수한 한국어로만 말한다.")
         temperature = max(0.3, GEN_TEMPERATURE - 0.3)
@@ -453,7 +453,7 @@ def _generate_reply(npc_id: str, system_prompt: str, convo_messages: list) -> st
 
     # 두 번 다 문제가 있으면 문제 문장을 정리한다
     # 깨진 글자(�)는 "…" 바로 뒤에 붙어 나오는 경우가 많아서, 문장째 버리지 않고 글자만 지운다
-    best = drop_foreign_sentences(fix_meta_words((reply2 or reply).replace("�", "")))
+    best = drop_foreign_sentences(fix_meta_words((reply2 or reply).replace("�", ""), npc_address(npc_id)))
     # 마지막 단계에서는 '직전 답변 반복'만 뺀다. 예시 대사를 베낀 정도는 앞뒤가 안 맞는 답보다 낫다.
     leftover = drop_sentences(best, repeated_sentences(best, recent_replies))
     best = strip_leading_connective(leftover) or best

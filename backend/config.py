@@ -5,7 +5,7 @@ LM_STUDIO_MODEL = "qwen3-4b"
 TOP_K_CHUNKS = 3  # how many RAG chunks to retrieve per query
 # 스토리 문서가 이 글자 수 이하인 NPC는 검색 대신 문서 전체를 프롬프트에 넣는다
 # (문서가 짧으면 검색으로 일부만 뽑는 것보다 전체가 더 정확하다)
-FULL_STORY_MAX_CHARS = 3000
+FULL_STORY_MAX_CHARS = 3500
 
 # ── 대화 기억 ──
 # NPC 답변을 만들 때 넣어 주는 "이 NPC와의 최근 메시지" 개수 (유저+NPC 합계, 10 = 5턴)

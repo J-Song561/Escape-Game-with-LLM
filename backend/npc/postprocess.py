@@ -149,9 +149,34 @@ def has_meta_word(text: str) -> bool:
     return bool(META_WORD_RE.search(text))
 
 
-def fix_meta_words(text: str) -> str:
-    """재생성 후에도 남았을 때의 마지막 보정: '유저분/유저님/유저' → '손님'."""
-    return re.sub(r"(유저|플레이어)(분|님)?", "손님", text)
+def _has_batchim(word: str) -> bool:
+    """마지막 글자에 받침이 있는지 (한글이 아니면 False)."""
+    code = ord(word[-1]) - 0xAC00
+    return 0 <= code <= 11171 and code % 28 != 0
+
+
+# 받침 유무에 따라 바뀌는 조사 쌍: (받침 있을 때, 없을 때)
+_JOSA_PAIRS = [("은", "는"), ("이", "가"), ("을", "를"), ("과", "와")]
+
+
+def fix_meta_words(text: str, address: str = "당신") -> str:
+    """
+    재생성 후에도 남았을 때의 마지막 보정: '유저분/유저님/유저' → NPC의 호칭(당신/아가씨).
+    "유저분은" → "아가씨는"처럼 뒤따르는 조사도 호칭의 받침에 맞춘다.
+    """
+    batchim = _has_batchim(address)
+
+    def repl(m):
+        josa = m.group(3) or ""
+        for with_b, without_b in _JOSA_PAIRS:
+            if josa in (with_b, without_b):
+                josa = with_b if batchim else without_b
+                break
+        return address + josa
+
+    text = re.sub(r"(유저|플레이어)(분|님)?(은|는|이|가|을|를|과|와)?(?=[\s.,!?…~]|$)", repl, text)
+    # 조사 판단이 어려운 나머지 경우("유저분이세요")는 호칭만 바꾼다
+    return re.sub(r"(유저|플레이어)(분|님)?", address, text)
 
 
 def secret_sentences(text: str, patterns: List[str]) -> List[str]:
