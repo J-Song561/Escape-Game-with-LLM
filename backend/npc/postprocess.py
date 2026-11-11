@@ -200,9 +200,17 @@ def fix_self_reference(text: str, self_name: str) -> str:
 
 
 def secret_sentences(text: str, patterns: List[str]) -> List[str]:
-    """비밀을 털어놓는 문장(patterns 중 하나에 걸리는 문장)을 찾는다."""
+    """
+    비밀을 털어놓는 문장(patterns 중 하나에 걸리는 문장)을 찾는다.
+    "그날은… 별장이 불탔어요. 부인이 이스터 경을 두고… 그걸 봤어요."처럼 여러 문장에 걸쳐
+    털어놓는 경우도 있어서, 문장 하나하나에서 안 걸려도 답변 전체에서 걸리면 모든 문장을 돌려준다.
+    """
     regs = [re.compile(p) for p in patterns]
-    return [s for s in split_sentences(text) if any(r.search(s) for r in regs)]
+    sentences = split_sentences(text)
+    found = [s for s in sentences if any(r.search(s) for r in regs)]
+    if not found and any(r.search(" ".join(sentences)) for r in regs):
+        return sentences
+    return found
 
 
 def drop_foreign_sentences(text: str) -> str:
