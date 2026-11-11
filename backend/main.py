@@ -32,7 +32,7 @@ from npc.npc_list import NPC_LIST, VALID_NPCS
 from npc.postprocess import (
     clean_reply, has_foreign_script, drop_foreign_sentences, repeated_sentences, drop_sentences,
     secret_sentences, has_meta_word, fix_meta_words, strip_leading_connective,
-    copied_example_sentences,
+    copied_example_sentences, fix_self_reference,
 )
 from rag.retriever import retrieve_context
 from memory import store
@@ -413,6 +413,8 @@ def _generate_reply(npc_id: str, system_prompt: str, convo_messages: list) -> st
     def generate(prompt: str, temperature: float) -> str:
         raw, truncated = _call_npc_llm(npc_id, prompt, convo_messages, temperature)
         text = clean_reply(raw, names, npc["max_sentences"], truncated)
+        # "엘라의 마음속에서"처럼 자기를 3인칭으로 말하면 1인칭으로 바꾼다
+        text = fix_self_reference(text, npc["name"].split()[0])
         # "…"만 있는 답변은 유저가 받을 정보가 없으므로 빈 답변으로 보고 다시 만든다
         return text if re.sub(r"[\s….!?~]", "", text) else ""
 

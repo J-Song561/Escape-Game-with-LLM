@@ -86,6 +86,9 @@ def strip_emoji(text: str) -> str:
 _NORM_RE = re.compile(r"[\s.,!?…~\"'“”‘’()\[\]]")
 REPEAT_MIN_CHARS = 6      # 이보다 짧은 문장("그렇군요.")은 반복 검사에서 뺀다
 REPEAT_THRESHOLD = 0.6    # 직전 답변과 글자 유사도가 이 이상이면 같은 문장으로 본다
+# 짧은 문장은 "진짜 긴장해서요"/"진짜 궁금해요"처럼 몇 글자만 겹쳐도 0.6을 넘으므로 더 엄격하게 본다
+SHORT_SENTENCE_CHARS = 10
+SHORT_REPEAT_THRESHOLD = 0.8
 # 예시 대사는 같은 상황이면 비슷한 말이 나오는 게 자연스러우므로, 거의 그대로 베낀 경우만 잡는다
 EXAMPLE_COPY_THRESHOLD = 0.85
 
@@ -122,7 +125,8 @@ def repeated_sentences(reply: str, previous_replies: List[str]) -> List[str]:
         n = _norm(sent)
         if len(n) < REPEAT_MIN_CHARS:
             continue
-        if any(_similar(n, s) for s in seen):
+        threshold = SHORT_REPEAT_THRESHOLD if len(n) < SHORT_SENTENCE_CHARS else REPEAT_THRESHOLD
+        if any(_similar(n, s, threshold) for s in seen):
             found.append(sent)
         seen.append(n)
     return found
@@ -177,6 +181,22 @@ def fix_meta_words(text: str, address: str = "당신") -> str:
     text = re.sub(r"(유저|플레이어)(분|님)?(은|는|이|가|을|를|과|와)?(?=[\s.,!?…~]|$)", repl, text)
     # 조사 판단이 어려운 나머지 경우("유저분이세요")는 호칭만 바꾼다
     return re.sub(r"(유저|플레이어)(분|님)?", address, text)
+
+
+# 자기 이름 + 조사 → 1인칭 ("엘라의 일상" → "제 일상")
+_SELF_JOSA = {
+    "가": "제가", "이": "제가", "의": "제", "는": "저는", "은": "저는",
+    "를": "저를", "을": "저를", "에게": "저에게", "한테": "저한테", "도": "저도",
+}
+
+
+def fix_self_reference(text: str, self_name: str) -> str:
+    """
+    작은 모델은 캐릭터를 바깥에서 설명하듯 "엘라의 마음속에서…"처럼 자기를 3인칭으로 말한다.
+    NPC 자신의 이름(+ "부인")에 조사가 붙은 경우만 1인칭으로 바꾼다.
+    """
+    pattern = rf"{re.escape(self_name)}(?:\s?부인)?(에게|한테|가|이|의|는|은|를|을|도)(?![가-힣])"
+    return re.sub(pattern, lambda m: _SELF_JOSA[m.group(1)], text)
 
 
 def secret_sentences(text: str, patterns: List[str]) -> List[str]:

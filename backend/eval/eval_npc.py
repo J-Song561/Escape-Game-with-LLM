@@ -140,15 +140,19 @@ def _sentences(text: str) -> list:
     return [p for p in re.split(r"(?:(?<=[.!?])|(?<=[.!?][\"'”’)]))\s+|\n+", text.strip()) if p.strip()]
 
 
-def count_similar_sentences(reply: str, previous: list) -> int:
-    """직전 답변들(같은 NPC)과 글자 유사도 0.6 이상인 문장 수. 이름만 바꾼 틀 반복도 잡는다."""
+def count_similar_sentences(reply: str, previous: list, threshold: float = 0.6) -> int:
+    """
+    previous와 글자 유사도가 threshold 이상인 문장 수. 이름만 바꾼 틀 반복도 잡는다.
+    서버(npc/postprocess.py)와 같은 기준: 10글자 미만의 짧은 문장은 0.8 이상만 반복으로 본다.
+    """
     norm = lambda s: re.sub(r"[\s.,!?…~\"'“”‘’()]", "", s)
     seen = [norm(s) for r in previous for s in _sentences(r)]
     seen = [s for s in seen if len(s) >= 6]
     n = 0
     for sent in _sentences(reply):
         s = norm(sent)
-        if len(s) >= 6 and any(difflib.SequenceMatcher(None, s, p).ratio() >= 0.6 for p in seen):
+        th = max(threshold, 0.8) if len(s) < 10 else threshold
+        if len(s) >= 6 and any(difflib.SequenceMatcher(None, s, p).ratio() >= th for p in seen):
             n += 1
     return n
 
@@ -205,7 +209,7 @@ def run_scenario(name: str, turns: list, run_bg: bool) -> dict:
         n_rep = count_similar_sentences(reply, prev_by_npc.get(npc, [])[-3:])
         if n_rep:
             issues.append(f"유사반복({n_rep}문장)")
-        n_copy = count_similar_sentences(reply, EXAMPLES.get(npc, []))
+        n_copy = count_similar_sentences(reply, EXAMPLES.get(npc, []), threshold=0.85)  # 서버와 같은 기준
         if n_copy:
             issues.append(f"예시복사({n_copy}문장)")
         prev_by_npc.setdefault(npc, []).append(reply)
